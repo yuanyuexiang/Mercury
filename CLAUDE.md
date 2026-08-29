@@ -15,7 +15,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前进度
 
-M1 脚手架、M2 消息闭环骨架、M3 知识库（2026-08-29）、M4 受约束 RAG（2026-08-30）已完成。下一步：M5 线索（技术方案 §18）。
+M1 脚手架、M2 消息闭环骨架、M3 知识库（2026-08-29）、M4 受约束 RAG、M5 线索（2026-08-30）已完成。下一步：M6 人工接管（技术方案 §18）。
+
+M5 说明：管线出现购买意图（或已有 lead）→ update 标 `replied` + 入队 `extract_lead` 独立任务（提取→合并→评分→追问→高意向通知→版本化同步任务行）；评分/合并是纯函数（`domain/scoring.py`/`lead_merge.py`），LLM 只输出事实（含 asked_demo_or_quote/freebie_only 两个事实布尔，migration 0002 加了对应列）；追问有代码层兜底——关键字段全被填/拒后即使 LLM 给了问题也不发。integration_jobs 行已创建但 sync_lead 的 enqueue 留给 M7（TODO 标注）。注意 ORM UPDATE 会同步内存对象，版本号必须先算后用（见 run_extract_lead 注释）。
 
 M4 说明：LLM 依赖经 `Brain` 协议注入编排层（实现在 `llm/brain.py`，测试用 conftest 的 FakeBrain）；提示词全部在 `llm/prompts.py`（拒答用 NO_ANSWER_MARKER 哨兵）；端到端预算 `Deadline` 在 `domain/schemas.py`（triage 上限 2s 计入总预算，RAG 拿剩余）；chat 客户端双档策略——用户路径不重试不切 fallback，非用户路径重试1次+fallback。**真实模型验收**：配好 `.env`（LLM_API_KEY/LLM_CHAT_MODEL）后跑 `uv run python scripts/eval_rag.py --with-answers`，看"生成级报告"两个指标。
 

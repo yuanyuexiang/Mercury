@@ -224,6 +224,11 @@ class Lead(Base):
     declined_fields: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'")
     )
+    # 提取出的事实布尔，供 §8 确定性评分（asked_demo +25 / freebie_only -20）
+    asked_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    freebie_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     score: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     grade: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'low'"))
     score_reasons: Mapped[list[Any]] = mapped_column(

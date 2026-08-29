@@ -20,8 +20,13 @@ async def sweep(ctx: dict[str, Any]) -> dict[str, int]:
     for update_id in set(reset_ids) | set(stale_ids):
         await ctx["redis"].enqueue_job("process_update", update_id, None)
 
-    # TODO(M5): ③ replied 超 5min → enqueue extract_lead
+    # ③ replied 超 5min（extract_lead 任务丢失）→ 补 enqueue（§6）
+    async with session_factory() as session:
+        replied_ids = await repositories.stale_replied_ids(session, stale_seconds=300)
+    for update_id in replied_ids:
+        await ctx["redis"].enqueue_job("extract_lead", update_id, None)
+
     # TODO(M7): ④ integration_jobs running 超 10min → 重置 pending 后入队
-    if reset_ids or stale_ids:
-        logger.info("sweeper_recovered", reset=reset_ids, stale=stale_ids)
-    return {"reset": len(reset_ids), "stale": len(stale_ids)}
+    if reset_ids or stale_ids or replied_ids:
+        logger.info("sweeper_recovered", reset=reset_ids, stale=stale_ids, replied=replied_ids)
+    return {"reset": len(reset_ids), "stale": len(stale_ids), "replied": len(replied_ids)}

@@ -40,6 +40,28 @@ class RagAnswer(BaseModel):
     latency_ms: int | None = None
 
 
+class LeadExtraction(BaseModel):
+    """线索字段提取输出（§7）。只提取用户明说的事实，缺失留 null，绝不猜测。"""
+
+    name: str | None = None
+    company: str | None = None
+    country: str | None = None
+    business_email: str | None = None
+    requirement: str | None = None
+    team_size: str | None = None
+    budget_range: str | None = None
+    purchase_timeline: str | None = None
+    integrations: list[str] = []
+    notes: str | None = None
+    # 显式事实布尔（供 §8 确定性评分；替代原"notes 标记"设计）
+    asked_demo_or_quote: bool = False
+    freebie_only: bool = False
+    # 本轮用户明确拒绝提供的字段名
+    refused_fields: list[str] = []
+    # 至多一个追问（用户语言）；无值得问的或已拒绝则为 null
+    follow_up_question: str | None = None
+
+
 class PlannedMessage(BaseModel):
     """统一投递的一条待发消息（§6 第 4 步）。delivery_key 是投递幂等键。"""
 
@@ -61,3 +83,5 @@ class ReplyPlan(BaseModel):
     messages: list[PlannedMessage] = []
     final_status: Literal["done", "skipped"] = "done"
     notify_operator: str | None = None  # 需要提醒运营者的文案（可与回复并存）
+    # True → update 标记 'replied' 并入队 extract_lead（§6 第 5 步）
+    needs_lead_extraction: bool = False

@@ -12,9 +12,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.models import (
+    AuditLog,
     Conversation,
+    IntegrationJob,
     KnowledgeChunk,
     KnowledgeDocument,
+    Lead,
     Message,
     TelegramUpdate,
     User,
@@ -377,3 +380,111 @@ async def delete_chunks_except(session: AsyncSession, document_id: int, keep_ver
             KnowledgeChunk.version != keep_version,
         )
     )
+
+
+# ---------- leads / audit（§7/§8，M5） ----------
+
+LEAD_SNAPSHOT_FIELDS = (
+    "name",
+    "company",
+    "country",
+    "business_email",
+    "requirement",
+    "team_size",
+    "budget_range",
+    "purchase_timeline",
+    "integrations",
+    "notes",
+    "declined_fields",
+    "asked_demo",
+    "freebie_only",
+    "score",
+    "grade",
+)
+
+
+def lead_to_dict(lead: Lead) -> dict[str, Any]:
+    return {f: getattr(lead, f) for f in LEAD_SNAPSHOT_FIELDS}
+
+
+async def get_lead_by_conversation(session: AsyncSession, conversation_id: int) -> Lead | None:
+    stmt = select(Lead).where(Lead.conversation_id == conversation_id)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_or_create_lead(session: AsyncSession, user_id: int, conversation_id: int) -> Lead:
+    lead = await get_lead_by_conversation(session, conversation_id)
+    if lead is not None:
+        return lead
+    stmt = (
+        pg_insert(Lead)
+        .values(user_id=user_id, conversation_id=conversation_id)
+        .on_conflict_do_nothing(index_elements=["conversation_id"])
+        .returning(Lead)
+    )
+    lead = (await session.execute(stmt)).scalar_one_or_none()
+    if lead is not None:
+        return lead
+    lead = await get_lead_by_conversation(session, conversation_id)
+    assert lead is not None
+    return lead
+
+
+async def update_lead(session: AsyncSession, lead_id: int, values: dict[str, Any]) -> None:
+    await session.execute(
+        update(Lead).where(Lead.id == lead_id).values(**values, updated_at=func.now())
+    )
+
+
+async def add_audit(
+    session: AsyncSession,
+    actor_type: str,
+    action: str,
+    entity_type: str,
+    entity_id: int,
+    metadata: dict[str, Any],
+    actor_id: str | None = None,
+) -> None:
+    session.add(
+        AuditLog(
+            actor_type=actor_type,
+            actor_id=actor_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            meta=metadata,
+        )
+    )
+
+
+async def stale_replied_ids(session: AsyncSession, stale_seconds: int = 300) -> list[int]:
+    """兜底扫描器③：replied 超时（extract_lead 任务丢失）→ 补 enqueue（§6）。"""
+    deadline = datetime.now(UTC) - timedelta(seconds=stale_seconds)
+    stmt = select(TelegramUpdate.update_id).where(
+        TelegramUpdate.status == "replied", TelegramUpdate.picked_at < deadline
+    )
+    return [row[0] for row in (await session.execute(stmt)).fetchall()]
+
+
+async def create_integration_job(
+    session: AsyncSession,
+    integration_type: str,
+    entity_type: str,
+    entity_id: int,
+    idempotency_key: str,
+    payload: dict[str, Any],
+) -> bool:
+    """版本化幂等键（§11）：已存在返回 False。"""
+    stmt = (
+        pg_insert(IntegrationJob)
+        .values(
+            integration_type=integration_type,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+        )
+        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+    )
+    result = await session.execute(stmt)
+    return bool(cast(CursorResult[Any], result).rowcount)

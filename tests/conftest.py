@@ -134,6 +134,35 @@ def brain() -> FakeBrain:
     return FakeBrain()
 
 
+class FakeExtractor:
+    """LeadExtractor 协议的测试替身。"""
+
+    def __init__(self) -> None:
+        from domain.schemas import LeadExtraction
+
+        self.result = LeadExtraction()
+        self.raise_error = False
+        self.calls: list[dict[str, Any]] = []
+
+    async def extract(
+        self,
+        history: list[dict[str, str]],
+        current_lead: dict[str, Any],
+        declined_fields: list[str],
+    ) -> Any:
+        if self.raise_error:
+            raise RuntimeError("extract boom")
+        self.calls.append(
+            {"history": history, "current": current_lead, "declined": declined_fields}
+        )
+        return self.result
+
+
+@pytest.fixture
+def extractor() -> FakeExtractor:
+    return FakeExtractor()
+
+
 @pytest.fixture
 def locker(redis_client: aioredis.Redis) -> RedisLock:
     return RedisLock(redis_client, prefix="conv", ttl_seconds=10, renew_every_seconds=3)

@@ -10,9 +10,16 @@ from typing import Literal, Protocol
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from domain import repositories, texts
-from domain.models import Conversation, Message
-from domain.schemas import Deadline, PlannedMessage, RagAnswer, ReplyPlan, TriageResult
+from domain import lead_merge, repositories, scoring, texts
+from domain.models import Conversation, Message, TelegramUpdate
+from domain.schemas import (
+    Deadline,
+    LeadExtraction,
+    PlannedMessage,
+    RagAnswer,
+    ReplyPlan,
+    TriageResult,
+)
 
 logger = structlog.get_logger()
 
@@ -46,9 +53,22 @@ class Brain(Protocol):
     ) -> RagAnswer: ...
 
 
+class LeadExtractor(Protocol):
+    """llm.extraction.LlmLeadExtractor 实现；测试用 FakeExtractor。"""
+
+    async def extract(
+        self,
+        history: list[dict[str, str]],
+        current_lead: dict[str, object],
+        declined_fields: list[str],
+    ) -> LeadExtraction: ...
+
+
 SessionFactory = async_sessionmaker[AsyncSession]
 
-PipelineOutcome = Literal["done", "locked", "duplicate", "failed"]
+PipelineOutcome = Literal["done", "replied", "locked", "duplicate", "failed"]
+
+ExtractOutcome = Literal["done", "locked", "skipped"]
 
 
 def _history_from_messages(messages: list[Message]) -> list[dict[str, str]]:
@@ -122,6 +142,10 @@ async def _decide(
         logger.warning("triage_failed_using_defaults", update_id=update_id)
         tri = TriageResult()  # risk=none, needs_rag=True：宁可多检索，不可漏风险以外的回答
 
+    # §6 第 5 步：购买意图或已有 lead → 回复后由 extract_lead 任务提取（敏感分支除外）
+    existing_lead = await repositories.get_lead_by_conversation(session, conversation.id)
+    needs_extraction = tri.purchase_intent or existing_lead is not None
+
     if tri.risk != "none":
         # TODO(M6): transition(handoff_pending, sensitive)；当前先模板 + 通知
         return ReplyPlan(
@@ -142,7 +166,8 @@ async def _decide(
                 PlannedMessage(
                     delivery_key=f"reply:{update_id}", text=texts.SMALLTALK, sender_type="system"
                 )
-            ]
+            ],
+            needs_lead_extraction=needs_extraction,
         )
 
     try:
@@ -167,9 +192,9 @@ async def _decide(
                 )
             ],
             notify_operator=f"知识库无法回答（会话 {conversation.id}）：{text_content[:80]}",
+            needs_lead_extraction=needs_extraction,
         )
 
-    # TODO(M5): tri.purchase_intent → status='replied' + enqueue extract_lead
     return ReplyPlan(
         messages=[
             PlannedMessage(
@@ -182,7 +207,8 @@ async def _decide(
                 latency_ms=ans.latency_ms,
                 source_chunk_ids=ans.source_chunk_ids or None,
             )
-        ]
+        ],
+        needs_lead_extraction=needs_extraction,
     )
 
 
@@ -323,6 +349,11 @@ async def run_process_update(
                 if plan.notify_operator:
                     await sender.notify_operator(plan.notify_operator)
 
+                if plan.final_status == "done" and plan.needs_lead_extraction:
+                    # §6 第 5 步：回复已送达，线索提取交给独立任务
+                    await repositories.mark_update(session, update_id, "replied")
+                    await session.commit()
+                    return "replied"
                 await repositories.mark_update(session, update_id, plan.final_status)
                 await session.commit()
             return "done"
@@ -361,3 +392,136 @@ async def run_process_update(
             except Exception:
                 logger.exception("operator_notify_failed", update_id=update_id)
             return "failed"
+
+
+async def run_extract_lead(
+    session_factory: SessionFactory,
+    locker: ConversationLocker,
+    sender: MessageSender,
+    extractor: LeadExtractor | None,
+    update_id: int,
+) -> ExtractOutcome:
+    """extract_lead 任务（§6）：回复已送达后执行，失败绝不打扰用户。
+
+    提取 → 合并 → 评分 → 追问（单独一条消息）→ 高意向通知 → 实质变更建同步任务；
+    成功或最终失败均把 update 收敛到 done，绝不重跑 triage/RAG、绝不发"系统繁忙"。
+    """
+    async with session_factory() as session:
+        row = await session.get(TelegramUpdate, update_id)
+        if row is None or row.status != "replied":
+            return "skipped"
+        payload = row.payload
+
+    message = payload.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    tg_user = message.get("from")
+    if chat_id is None or tg_user is None:
+        async with session_factory() as session:
+            await repositories.mark_update(session, update_id, "done")
+            await session.commit()
+        return "done"
+
+    async with locker.hold(chat_id) as acquired:
+        if not acquired:
+            return "locked"  # 状态保持 replied，由重入队/扫描器再试
+
+        async with session_factory() as session:
+            try:
+                user = await repositories.upsert_user(session, tg_user)
+                conversation = await repositories.get_open_conversation(session, chat_id, user.id)
+                if conversation is None:  # 会话已被 /reset 关闭等
+                    await repositories.mark_update(session, update_id, "done")
+                    await session.commit()
+                    return "done"
+
+                lead = await repositories.get_or_create_lead(session, user.id, conversation.id)
+                await session.commit()
+                current = repositories.lead_to_dict(lead)
+                old_grade = lead.grade
+
+                if extractor is None:
+                    raise RuntimeError("extractor 未配置（缺少 LLM_CHAT_MODEL/LLM_API_KEY）")
+                recent = await repositories.get_recent_messages(session, conversation.id)
+                history = _history_from_messages(recent)
+                extraction = await extractor.extract(history, current, list(lead.declined_fields))
+
+                merge = lead_merge.merge_lead(current, extraction)
+                merged = {**current, **merge.updates}
+                declined_all = [*lead.declined_fields, *merge.declined_added]
+                result = scoring.score_lead(merged)
+
+                values: dict[str, object] = dict(merge.updates)
+                if merge.declined_added:
+                    values["declined_fields"] = declined_all
+                score_changed = result.score != lead.score or result.grade != lead.grade
+                if score_changed:
+                    values.update(
+                        score=result.score, grade=result.grade, score_reasons=result.reasons
+                    )
+                substantial_change = merge.changed or score_changed
+                # 只计算一次：ORM UPDATE 会同步内存对象，事后再读 lead.version 已是新值
+                new_version = lead.version + 1
+                if substantial_change:
+                    values["version"] = new_version
+                    await repositories.update_lead(session, lead.id, values)
+                    for entry in merge.audit:
+                        await repositories.add_audit(
+                            session, "ai", "lead_field_update", "lead", lead.id, entry
+                        )
+                    await session.commit()
+
+                # 追问：仍有缺失关键字段且未被拒绝，且 LLM 给出了问题（§6 第 2 步）
+                if extraction.follow_up_question and lead_merge.missing_key_fields(
+                    merged, declined_all
+                ):
+                    await _deliver(
+                        session,
+                        sender,
+                        conversation,
+                        update_id,
+                        ReplyPlan(
+                            messages=[
+                                PlannedMessage(
+                                    delivery_key=f"followup:{update_id}",
+                                    text=extraction.follow_up_question,
+                                )
+                            ]
+                        ),
+                    )
+
+                if result.grade == "high" and old_grade != "high":
+                    # TODO(M6): 写 handoffs(high_intent) 通知型记录
+                    await sender.notify_operator(
+                        f"🔥 高意向线索（会话 {conversation.id}）：score={result.score}，"
+                        f"理由 {', '.join(result.reasons)}"
+                    )
+
+                if substantial_change:
+                    await repositories.create_integration_job(
+                        session,
+                        integration_type="google_sheets",
+                        entity_type="lead",
+                        entity_id=lead.id,
+                        idempotency_key=f"sheets:lead:{lead.id}:v{new_version}",
+                        payload={**merged, "score": result.score, "grade": result.grade},
+                    )
+                    await session.commit()
+                    # TODO(M7): enqueue sync_lead(job)——worker 注册 sync_lead 后开启
+
+                await repositories.mark_update(session, update_id, "done")
+                await session.commit()
+                return "done"
+            except Exception as exc:
+                logger.exception("extract_lead_failed", update_id=update_id)
+                await session.rollback()
+                await repositories.mark_update(
+                    session, update_id, "done", error=f"extract_failed: {exc!r}"
+                )
+                await session.commit()
+                try:
+                    await sender.notify_operator(
+                        f"线索提取失败（update {update_id}），请人工查看会话：{exc!r}"
+                    )
+                except Exception:
+                    logger.exception("operator_notify_failed", update_id=update_id)
+                return "done"

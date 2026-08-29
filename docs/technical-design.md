@@ -269,6 +269,8 @@ CREATE TABLE leads (
   integrations      JSONB NOT NULL DEFAULT '[]',
   notes             TEXT,
   declined_fields   TEXT[] NOT NULL DEFAULT '{}',  -- 用户拒绝提供的字段，不再追问
+  asked_demo        BOOLEAN NOT NULL DEFAULT false,  -- 提取的事实布尔：要过 Demo/报价（评分 +25）
+  freebie_only      BOOLEAN NOT NULL DEFAULT false,  -- 仅求免费资源（评分 -20）
   score             INT NOT NULL DEFAULT 0,
   grade             TEXT NOT NULL DEFAULT 'low',   -- low|medium|high
   score_reasons     JSONB NOT NULL DEFAULT '[]',
@@ -455,6 +457,8 @@ class LeadExtraction(BaseModel):
     purchase_timeline: str | None
     integrations: list[str]
     notes: str | None
+    asked_demo_or_quote: bool  # 事实布尔：要过 Demo/报价（供 §8 评分，持久化到 leads.asked_demo）
+    freebie_only: bool  # 事实布尔：仅求免费资源（持久化到 leads.freebie_only）
     refused_fields: list[str]  # 本轮用户明确拒绝提供的字段
     follow_up_question: str | None  # 建议追问（至多一个，可为 None）
 ```
@@ -477,8 +481,9 @@ RULES = [
     ("team_size_fit",   +15, lambda l: team_size 达标),
     ("budget_given",    +15, lambda l: budget_range 非空),
     ("timeline_30d",    +20, lambda l: purchase_timeline 解析为 30 天内),
-    ("asked_demo",      +25, lambda l: 对话中出现 demo/报价请求 → 由 extraction 落入 notes 标记),
-    ("freebie_only",    -20, lambda l: 仅求免费资源标记),
+    ("asked_demo",      +25, lambda l: leads.asked_demo 事实列为真——由 extraction 显式输出，
+                              # 而非 notes 魔法标记（M5 修订）),
+    ("freebie_only",    -20, lambda l: leads.freebie_only 事实列为真),
 ]
 # 0–29 low | 30–59 medium | ≥60 high
 ```
