@@ -13,15 +13,16 @@ from integrations.locks import RedisLock
 from integrations.sheets import build_lead_sync
 from integrations.telegram import build_sender
 from llm.brain import ConversationSummarizer, RagBrain
-from llm.client import build_chat_client, build_embedder
+from llm.client import build_embedder
 from llm.extraction import LlmLeadExtractor
+from llm.provider_config import DynamicChatClient, ProviderSource
 from observability.logging import configure_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from worker.tasks.extract_lead import extract_lead
 from worker.tasks.index_document import index_document
 from worker.tasks.process_update import process_update
-from worker.tasks.sweeper import sweep
+from worker.tasks.sweeper import retention_cleanup, sweep
 from worker.tasks.sync_lead import sync_lead
 
 
@@ -37,17 +38,21 @@ async def on_startup(ctx: dict[str, Any]) -> None:
     ctx["locker"] = RedisLock(redis_client, prefix="conv")
     ctx["index_locker"] = RedisLock(redis_client, prefix="index", ttl_seconds=120)
     ctx["sender"] = build_sender(settings.telegram_bot_token, settings.operator_telegram_chat_id)
-    # LLM 依赖共享同一 chat client；缺 key/模型名时为 None → 各自安全降级
-    chat = build_chat_client(settings)
-    embedder = build_embedder(settings)
+    # chat 经 DynamicChatClient：DB 激活供应商优先、env 兜底，后台切换不重启即生效（§12）
+    provider_source = ProviderSource(ctx["session_factory"], redis_client, settings)
+    provider_source.start_listener()
+    ctx["provider_source"] = provider_source
+    chat = DynamicChatClient(provider_source)
+    embedder = build_embedder(settings)  # embedding 仅 env 配置（§12）
     ctx["embedder"] = embedder  # None → 索引任务明确失败
-    ctx["brain"] = RagBrain(chat, embedder, settings) if chat and embedder else None
-    ctx["extractor"] = LlmLeadExtractor(chat) if chat else None
-    ctx["summarizer"] = ConversationSummarizer(chat) if chat else None
-    ctx["sync_port"] = build_lead_sync(settings)  # None → 同步任务明确失败并通知
+    ctx["brain"] = RagBrain(chat, embedder, settings) if embedder else None
+    ctx["extractor"] = LlmLeadExtractor(chat)
+    ctx["summarizer"] = ConversationSummarizer(chat)
+    ctx["sync_port"] = build_lead_sync(settings)  # None → 同步任务走 retry 等待配置
 
 
 async def on_shutdown(ctx: dict[str, Any]) -> None:
+    await ctx["provider_source"].stop_listener()
     await ctx["sender"].close()
     await ctx["redis_client"].aclose()
     await ctx["engine"].dispose()
@@ -55,7 +60,10 @@ async def on_shutdown(ctx: dict[str, Any]) -> None:
 
 class WorkerSettings:
     functions = [process_update, extract_lead, index_document, sync_lead]
-    cron_jobs = [cron(sweep, second=0)]  # 每分钟一次（§6 兜底扫描器）
+    cron_jobs = [
+        cron(sweep, second=0),  # 每分钟一次（§6 兜底扫描器）
+        cron(retention_cleanup, hour=4, minute=0),  # 每日数据保留期清理（§14）
+    ]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

@@ -51,3 +51,14 @@ async def sweep(ctx: dict[str, Any]) -> dict[str, int]:
         "replied": len(replied_ids),
         "jobs": len(set(job_reset_ids) | set(job_stale_ids)),
     }
+
+
+async def retention_cleanup(ctx: dict[str, Any]) -> dict[str, int]:
+    """每日数据保留期清理（§14，DATA_RETENTION_DAYS）。"""
+    settings = ctx["settings"]
+    async with ctx["session_factory"]() as session:
+        removed = await repositories.cleanup_expired_data(session, settings.data_retention_days)
+        await session.commit()
+    if any(removed.values()):
+        logger.info("retention_cleanup_done", **removed)
+    return removed

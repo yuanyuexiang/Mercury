@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ant-design/v5-patch-for-react-19": "^1.0.3",
     "antd": "^5.22.0",
     "next": "^15.1.0",
     "react": "^19.0.0",

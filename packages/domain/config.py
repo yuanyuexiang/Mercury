@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # 运行
     log_level: str = "INFO"
     data_retention_days: int = 180
+    storage_dir: str = "var/storage"  # 知识库原始文件存放目录（§6.1：首版本地 volume）
 
 
 @lru_cache

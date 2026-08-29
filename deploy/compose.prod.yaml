@@ -1,0 +1,126 @@
+# 生产/演示环境（技术方案 §16）：接入服务器既有 Traefik（外部网络 + labels），
+# 不向宿主机开放任何端口。服务器目录放本文件 + .env + deploy.sh。
+name: mercury
+
+services:
+  migrate:
+    image: ghcr.io/${GHCR_OWNER:?}/mercury-app:${IMAGE_TAG:-latest}
+    command: ["alembic", "upgrade", "head"]
+    env_file: .env
+    networks: [internal]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: ghcr.io/${GHCR_OWNER:?}/mercury-app:${IMAGE_TAG:-latest}
+    env_file: .env
+    restart: unless-stopped
+    networks: [internal, proxy]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:?}
+      # entrypoint/certresolver 名称按服务器既有 Traefik 配置调整（§16）
+      - traefik.http.routers.mercury-api.rule=Host(`${PUBLIC_HOST:?}`) && (PathPrefix(`/api`) || PathPrefix(`/webhooks`) || PathPrefix(`/health`))
+      - traefik.http.routers.mercury-api.priority=20
+      - traefik.http.routers.mercury-api.entrypoints=websecure
+      - traefik.http.routers.mercury-api.tls.certresolver=letsencrypt
+      - traefik.http.services.mercury-api.loadbalancer.server.port=8000
+
+  worker:
+    image: ghcr.io/${GHCR_OWNER:?}/mercury-app:${IMAGE_TAG:-latest}
+    command: ["arq", "worker.main.WorkerSettings"]
+    env_file: .env
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - storage:/app/var/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  web:
+    image: ghcr.io/${GHCR_OWNER:?}/mercury-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    networks: [proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:?}
+      - traefik.http.routers.mercury-web.rule=Host(`${PUBLIC_HOST:?}`)
+      - traefik.http.routers.mercury-web.priority=10
+      - traefik.http.routers.mercury-web.entrypoints=websecure
+      - traefik.http.routers.mercury-web.tls.certresolver=letsencrypt
+      - traefik.http.services.mercury-web.loadbalancer.server.port=3000
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mercury}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:-mercury}
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mercury}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backup:
+    # 每日 pg_dump 到 volume（§16：试点阶段够用）；保留最近 14 份
+    image: pgvector/pgvector:pg16
+    entrypoint:
+      - sh
+      - -c
+      - |
+        while true; do
+          PGPASSWORD=$$POSTGRES_PASSWORD pg_dump -h postgres -U $${POSTGRES_USER:-mercury} $${POSTGRES_DB:-mercury} \
+            > /backups/mercury_$$(date +%Y%m%d_%H%M%S).sql
+          ls -t /backups/mercury_*.sql | tail -n +15 | xargs -r rm
+          sleep 86400
+        done
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mercury}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:-mercury}
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  internal: {}
+  proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK:?}
+
+volumes:
+  pgdata:
+  redisdata:
+  backups:
+  storage:

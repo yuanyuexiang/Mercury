@@ -71,7 +71,8 @@ Mercury/
 ├── apps/
 │   ├── api/                    # FastAPI 入口
 │   │   ├── main.py             # app 工厂、路由挂载、生命周期
-│   │   ├── deps.py             # DI：db session、当前管理员、设置
+│   │   ├── deps.py             # DI：会话、管理员认证（cookie JWT）、CSRF
+│   │   ├── netguard.py         # SSRF 防护（URL 导入 / 供应商 base_url，§14）
 │   │   └── routers/
 │   │       ├── webhook.py      # Telegram webhook
 │   │       ├── auth.py
@@ -125,6 +126,7 @@ Mercury/
 │   │   ├── indexing.py         # 索引流程：解析→切分→embedding→版本化原子切换
 │   │   ├── extraction.py       # 字段提取调用
 │   │   ├── triage.py           # 意图/风险/是否需RAG 联合分类调用
+│   │   ├── provider_config.py  # DbConfigSource：Fernet 加密、60s缓存+广播失效、DynamicChatClient
 │   │   └── chunking.py         # 文档解析与切分
 │   ├── integrations/
 │   │   ├── telegram.py         # Bot API 封装（发消息、通知；无 token 时 LoggingSender 替身）
@@ -145,7 +147,11 @@ Mercury/
 │   ├── eval/                   # 评测资产：sample-product.md（虚拟产品）+ evalset.json
 │   └── set_webhook.py          # 注册 Telegram webhook
 ├── deploy/
-│   └── compose.yaml            # 接入服务器既有 Traefik（外部网络 + labels，见 §16）
+│   ├── compose.yaml            # 本地开发栈（postgres/redis）
+│   ├── compose.prod.yaml       # 生产：接入既有 Traefik（外部网络+labels）+ migrate/backup（§16）
+│   ├── Dockerfile.app          # api/worker 共用镜像
+│   ├── Dockerfile.web          # Next.js standalone 镜像
+│   └── deploy.sh               # 服务器端：拉起→健康检查→失败自动回滚（§17）
 ├── docs/
 ├── pyproject.toml              # 单一根项目：依赖 + hatch 多包映射（§1）
 └── .env.example

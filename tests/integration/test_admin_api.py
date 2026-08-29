@@ -1,0 +1,277 @@
+"""§10 后台 API：认证/CSRF/限流、会话接管、线索修正重评分、知识库、供应商配置与热切换。"""
+
+from typing import Any
+
+import bcrypt
+import httpx
+import pytest
+from api.main import create_app
+from domain import repositories
+from domain.config import Settings
+from domain.models import LlmProvider
+from domain.orchestrator import run_extract_lead, run_process_update
+from domain.schemas import LeadExtraction, TriageResult
+from llm.provider_config import ProviderSource, decrypt_api_key
+from sqlalchemy import select
+
+from tests.conftest import FakeSender, tg_update
+
+PASSWORD = "admin-secret-123"
+FERNET_KEY = "5adLfTdIiTupBnc0mkxSFcCLm4V2XdBperNzHbPWY7Y="  # 测试专用
+
+
+class StubArq:
+    def __init__(self) -> None:
+        self.jobs: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def enqueue_job(self, name: str, *args: Any, **kwargs: Any) -> None:
+        self.jobs.append((name, args))
+
+
+class FakeTestChat:
+    def __init__(self, ok: bool = True) -> None:
+        self.ok = ok
+
+    async def chat(self, messages: Any, *, purpose: str, timeout_s: float, schema: Any = None):
+        if not self.ok:
+            raise ConnectionError("bad key")
+        return type("R", (), {"content": "pong"})()
+
+
+@pytest.fixture
+def settings(redis_client) -> Settings:
+    return Settings(
+        admin_username="admin",
+        admin_password_hash=bcrypt.hashpw(PASSWORD.encode(), bcrypt.gensalt()).decode(),
+        jwt_secret="test-jwt-secret",
+        settings_encryption_key=FERNET_KEY,
+        telegram_webhook_secret="hook-secret",
+    )
+
+
+@pytest.fixture
+async def client(session_factory, redis_client, settings, sender):
+    app = create_app()
+    app.state.settings = settings
+    app.state.session_factory = session_factory
+    app.state.redis = redis_client
+    app.state.arq = StubArq()
+    app.state.sender = sender
+    app.state.chat_client_factory = lambda base_url, api_key, model: FakeTestChat(ok=True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        http.app = app  # type: ignore[attr-defined]
+        yield http
+
+
+WRITE_HEADERS = {"X-Requested-With": "fetch"}
+
+
+async def _login(client: httpx.AsyncClient) -> None:
+    resp = await client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": PASSWORD},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+
+
+async def test_auth_flow(client) -> None:
+    assert (await client.get("/api/conversations")).status_code == 401
+    bad = await client.post(
+        "/api/auth/login", json={"username": "admin", "password": "wrong"}, headers=WRITE_HEADERS
+    )
+    assert bad.status_code == 401
+    await _login(client)
+    assert (await client.get("/api/conversations")).status_code == 200
+
+
+async def test_login_rate_limit(client) -> None:
+    for _ in range(5):
+        await client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "wrong"},
+            headers=WRITE_HEADERS,
+        )
+    resp = await client.post(
+        "/api/auth/login", json={"username": "admin", "password": PASSWORD}, headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 429
+
+
+async def test_csrf_required_on_writes(client, session_factory, locker, brain) -> None:
+    await _login(client)
+    async with session_factory() as session:
+        await repositories.insert_update(session, 701, tg_update(701, "hi"))
+        await session.commit()
+    await run_process_update(session_factory, locker, client.app.state.sender, brain, 701)
+    resp = await client.post("/api/conversations/1/handoff")  # 无 CSRF 头
+    assert resp.status_code == 403
+
+
+async def test_takeover_and_resume_and_operator_message(
+    client, session_factory, locker, brain, sender: FakeSender
+) -> None:
+    await _login(client)
+    async with session_factory() as session:
+        await repositories.insert_update(session, 702, tg_update(702, "你好"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 702)
+
+    resp = await client.post("/api/conversations/1/handoff", headers=WRITE_HEADERS)
+    assert resp.status_code == 200 and resp.json()["status"] == "human_active"
+
+    resp = await client.post(
+        "/api/conversations/1/messages", json={"text": "您好，我是人工客服"}, headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 200
+    assert sender.sent[-1] == (1000, "您好，我是人工客服")
+
+    resp = await client.post("/api/conversations/1/resume-ai", headers=WRITE_HEADERS)
+    assert resp.status_code == 200 and resp.json()["status"] == "ai_active"
+
+    detail = (await client.get("/api/conversations/1")).json()
+    assert detail["conversation"]["status"] == "ai_active"
+    assert any(m["sender_type"] == "operator" for m in detail["messages"])
+    assert detail["handoffs"], "接管历史应可见"
+
+
+async def test_lead_patch_rescores_and_syncs(
+    client, session_factory, locker, brain, sender, extractor
+) -> None:
+    await _login(client)
+    brain.triage_result = TriageResult(purchase_intent=True)
+    extractor.result = LeadExtraction(company="Acme")
+    async with session_factory() as session:
+        await repositories.insert_update(session, 703, tg_update(703, "想采购"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 703)
+    await run_extract_lead(session_factory, locker, sender, extractor, 703)
+
+    resp = await client.patch(
+        "/api/leads/1",
+        json={"business_email": "cto@acme.io", "requirement": "客服机器人"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["score"] == 35 and data["grade"] == "medium"  # company_email 15 + clear_need 20
+    assert "company_email" in data["score_reasons"]
+    assert any(name == "sync_lead" for name, _ in client.app.state.arq.jobs)
+
+
+async def test_knowledge_upload_and_lifecycle(client, session_factory, tmp_path) -> None:
+    await _login(client)
+    client.app.state.settings.storage_dir = str(tmp_path)
+    resp = await client.post(
+        "/api/knowledge/documents",
+        files={"file": ("guide.md", b"# Hello\n\ncontent", "text/markdown")},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    doc_id = resp.json()["id"]
+    assert ("index_document", (doc_id,)) in [(n, a[:1]) for n, a in client.app.state.arq.jobs]
+
+    resp = await client.patch(
+        f"/api/knowledge/documents/{doc_id}", json={"status": "disabled"}, headers=WRITE_HEADERS
+    )
+    assert resp.json()["status"] == "disabled"
+
+    resp = await client.post(
+        "/api/knowledge/documents",
+        files={"file": ("guide2.md", b"# Hello\n\ncontent", "text/markdown")},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 409  # checksum 去重
+
+    assert (
+        await client.delete(f"/api/knowledge/documents/{doc_id}", headers=WRITE_HEADERS)
+    ).status_code == 200
+
+
+async def test_url_import_ssrf_blocked(client) -> None:
+    await _login(client)
+    for bad in ("http://127.0.0.1/x", "http://169.254.169.254/meta", "ftp://a.com/x"):
+        resp = await client.post(
+            "/api/knowledge/documents/url",
+            json={"url": bad, "title": "t"},
+            headers=WRITE_HEADERS,
+        )
+        assert resp.status_code == 422, bad
+
+
+async def test_provider_crud_activate_and_hot_reload(
+    client, session_factory, redis_client, settings
+) -> None:
+    await _login(client)
+    resp = await client.post(
+        "/api/settings/llm-providers",
+        json={
+            "name": "DeepSeek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "sk-test-1234abcd",
+            "chat_model": "deepseek-chat",
+        },
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    provider = resp.json()
+    assert "sk-test" not in str(provider), "明文 key 绝不能出现在响应中"
+
+    async with session_factory() as session:
+        row = (await session.execute(select(LlmProvider))).scalar_one()
+        assert row.api_key_enc != "sk-test-1234abcd"
+        assert decrypt_api_key(settings, row.api_key_enc) == "sk-test-1234abcd"
+
+    resp = await client.post(
+        f"/api/settings/llm-providers/{provider['id']}/activate", headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 200
+
+    # 热切换：ProviderSource 应解析到 DB 供应商（模拟 worker 侧）
+    source = ProviderSource(session_factory, redis_client, settings)
+    config = await source.get()
+    assert config is not None and config.source == "db"
+    assert config.chat_model == "deepseek-chat" and config.api_key == "sk-test-1234abcd"
+
+    # 测试连接（Fake chat 工厂）
+    resp = await client.post(
+        f"/api/settings/llm-providers/{provider['id']}/test", headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+
+    # 激活中的不可删
+    resp = await client.delete(
+        f"/api/settings/llm-providers/{provider['id']}", headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 409
+
+
+async def test_provider_source_env_fallback_and_invalidate(
+    session_factory, redis_client, settings
+) -> None:
+    source = ProviderSource(session_factory, redis_client, settings)
+    assert await source.get() is None  # DB 空且 env 未配 chat 模型
+
+    env_settings = settings.model_copy(update={"llm_api_key": "sk-env", "llm_chat_model": "gpt-x"})
+    source2 = ProviderSource(session_factory, redis_client, env_settings)
+    config = await source2.get()
+    assert config is not None and config.source == "env" and config.chat_model == "gpt-x"
+
+    source2.invalidate()
+    assert (await source2.get()) is not None  # 失效后重查仍可用
+
+
+async def test_metrics_endpoints(client, session_factory, locker, brain, sender) -> None:
+    await _login(client)
+    brain.refuse = True
+    async with session_factory() as session:
+        await repositories.insert_update(session, 704, tg_update(704, "冷门问题"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 704)
+
+    overview = (await client.get("/api/metrics/overview")).json()
+    assert overview["messages"] >= 2 and overview["refused"] == 1
+    gaps = (await client.get("/api/metrics/knowledge-gaps")).json()
+    assert gaps["items"][0]["question"] == "冷门问题"
+    assert (await client.get("/api/metrics/costs")).status_code == 200

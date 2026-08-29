@@ -15,7 +15,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前进度
 
-M1 脚手架、M2 消息闭环骨架、M3 知识库（2026-08-29）、M4 受约束 RAG、M5 线索、M6 人工接管、M7 Sheets 同步（2026-08-30）已完成。下一步：M8 后台与部署（技术方案 §18）。
+**M1–M8 全部完成**（M1–M3：2026-08-29；M4–M8：2026-08-30）。代码里程碑收官；剩余为运营侧工作（配真实凭据跑演示验收剧本、录 Demo、客户清单）。
+
+M8 说明：后台 API 全量在 `apps/api/routers/`（认证 cookie JWT + bcrypt + 登录限流；写接口需 `X-Requested-With: fetch` CSRF 头）；供应商配置在 `llm/provider_config.py`——Fernet 加密（主密钥 `SETTINGS_ENCRYPTION_KEY`，生成：`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`）、DB 优先 env 兜底、60s 缓存 + Redis 广播失效，worker 用 `DynamicChatClient` 每次调用解析配置（切换供应商不重启即生效）；SSRF 防护在 `api/netguard.py`（自建推理服务用 `ALLOW_PRIVATE_LLM_BASE_URL=true` 放开）。前端 8 页在 `apps/web/src/app/`（AntD 5 + React 19 补丁包）。部署：`deploy/compose.prod.yaml`（接既有 Traefik、migrate 一次性服务、每日备份保留 14 份）+ `deploy/deploy.sh`（健康检查失败自动回滚上一 tag）+ `.github/workflows/deploy.yml`（push main → GHCR → SSH；回滚 = workflow_dispatch 填历史 sha-* tag）。服务器初始化：`/opt/mercury/` 放 compose.prod.yaml + deploy.sh + .env，GitHub secrets 配 DEPLOY_HOST/USER/SSH_KEY。
 
 M7 说明：`run_sync_lead` 原子抢占（pending→running）→ 从 DB 读**最新** lead 组装行（payload 仅审计快照，乱序无害）→ LLM 摘要（失败不阻塞）→ `LeadSync` 端口 upsert → done + 回填 external_crm_id/status=synced；失败退避 2^attempts 分钟回 pending，≥5 次置 failed 并通知。gspread 实现在 `integrations/sheets.py`（按 Lead ID 列找行、to_thread 包同步库）；凭据未配置时任务走 retry 路径（配好即恢复）。扫描器④（running 超时重置 + pending 入队丢失补偿）已实装。**真实 Google Sheet 验证需要 Service Account**：`.env` 配 `GOOGLE_SERVICE_ACCOUNT_JSON`（路径或 base64）+ `LEADS_SPREADSHEET_ID`，并把表共享给 service account 邮箱。
 

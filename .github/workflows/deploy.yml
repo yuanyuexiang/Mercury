@@ -1,16 +1,72 @@
-# 发布流水线（技术方案 §17）。占位版本，仅手动触发；M8 实现：
-# buildx → GHCR（sha-*/latest）→ SSH 部署 → 健康检查 → 失败自动回滚。
+# 发布流水线（技术方案 §17）：buildx → GHCR（sha-*/latest）→ SSH 部署 → 健康检查（失败服务器端自动回滚）。
+# 回滚：workflow_dispatch 填某个历史 sha-* tag 重新部署。
 name: Deploy
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 镜像 tag（回滚时填某个 sha-*）
-        default: latest
+        description: 镜像 tag（留空 = 构建当前 commit；回滚填历史 sha-*）
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
 
 jobs:
-  placeholder:
+  build:
+    if: github.event_name == 'push' || inputs.image_tag == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push app image (api/worker)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.app
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/mercury-app:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/mercury-app:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build & push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.web
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/mercury-web:${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/mercury-web:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: [build]
+    if: always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.image_tag != ''))
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Deploy 占位——M8 实现（技术方案 §17）"
+      - name: SSH deploy（deploy.sh 自带健康检查与自动回滚）
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/mercury
+            ./deploy.sh "${{ inputs.image_tag != '' && inputs.image_tag || needs.build.outputs.tag }}"

@@ -631,3 +631,22 @@ async def stale_pending_job_ids(session: AsyncSession, grace_seconds: int = 300)
 
 async def get_lead(session: AsyncSession, lead_id: int) -> Lead | None:
     return await session.get(Lead, lead_id)
+
+
+async def cleanup_expired_data(session: AsyncSession, retention_days: int) -> dict[str, int]:
+    """数据保留期清理（§14）：删除超期的 telegram_updates 与已关闭超期会话（级联）。"""
+    from sqlalchemy import delete
+
+    deadline = datetime.now(UTC) - timedelta(days=retention_days)
+    updates_result = await session.execute(
+        delete(TelegramUpdate).where(TelegramUpdate.received_at < deadline)
+    )
+    convs_result = await session.execute(
+        delete(Conversation).where(
+            Conversation.status == "closed", Conversation.closed_at < deadline
+        )
+    )
+    return {
+        "updates": cast(CursorResult[Any], updates_result).rowcount,
+        "conversations": cast(CursorResult[Any], convs_result).rowcount,
+    }
