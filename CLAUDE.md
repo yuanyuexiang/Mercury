@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 这是一个全新仓库，**目前还没有任何代码**。两份核心文档：
 
-- [Telegram-AI-Lead-System-MVP.md](Telegram-AI-Lead-System-MVP.md) — 产品需求与边界的事实来源：用企业知识库通过 RAG 回答客户问题，从对话中提取并评分销售线索，必要时转人工，并将线索同步到 CRM / Google Sheets。
+- [docs/Telegram-AI-Lead-System-MVP.md](docs/Telegram-AI-Lead-System-MVP.md) — 产品需求与边界的事实来源（其 §6 技术建议已被技术方案替代）：用企业知识库通过 RAG 回答客户问题，从对话中提取并评分销售线索，必要时转人工，并将线索同步到 CRM / Google Sheets。
 - [docs/technical-design.md](docs/technical-design.md) — **实现级技术方案（写代码以它为准）**：所有选型已定案（aiogram、arq、SQLAlchemy async、gspread、纯 Python 编排管线不用 LangGraph）、完整 DDL、编排管线、状态机、API 契约、环境变量清单，以及 M1–M8 实现里程碑顺序。
 
 写任何代码前先读技术方案对应章节；表名、状态值、接口以技术方案为准，不即兴改名。新的设计决策要落回技术方案文档。等脚手架落地后，更新本文件补充真实的构建 / 测试 / 运行命令。

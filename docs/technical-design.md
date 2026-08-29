@@ -1,8 +1,8 @@
 # 技术实现方案
 
-Telegram AI 客服与询盘转化系统 — 实现级设计 v1.0
+Telegram AI 客服与询盘转化系统 — 实现级设计 v1.2（2026-08-29，两轮外部评审可靠性修订）
 
-- 上游文档：[Telegram-AI-Lead-System-MVP.md](../Telegram-AI-Lead-System-MVP.md)（需求与边界以它为准）
+- 上游文档：[Telegram-AI-Lead-System-MVP.md](./Telegram-AI-Lead-System-MVP.md)（需求与边界以它为准；其 §6 技术建议已被本文档替代）
 - 本文档用途：指导代码生成。所有"二选一"已在此定案，代码生成阶段不再做架构决策。
 - 日期：2026-08-29
 
@@ -84,8 +84,10 @@ Mercury/
 │   │   ├── main.py             # arq WorkerSettings
 │   │   └── tasks/
 │   │       ├── process_update.py
+│   │       ├── extract_lead.py     # 回复送达后独立执行的线索提取
 │   │       ├── index_document.py
-│   │       └── sync_lead.py
+│   │       ├── sync_lead.py
+│   │       └── sweeper.py          # 兜底扫描器（arq cron，见 §6）
 │   └── web/                    # 管理后台：Next.js 15 + AntD 5（独立 package.json）
 │       ├── src/
 │       │   ├── app/
@@ -155,7 +157,8 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE telegram_updates (          -- 幂等表
   update_id     BIGINT PRIMARY KEY,
   payload       JSONB NOT NULL,
-  status        TEXT NOT NULL DEFAULT 'queued',  -- queued|processing|done|failed|skipped
+  status        TEXT NOT NULL DEFAULT 'queued',  -- queued|processing|replied|done|failed|skipped
+  picked_at     TIMESTAMPTZ,                     -- worker 抢占时间（处理租约起点）
   error         TEXT,
   received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   processed_at  TIMESTAMPTZ
@@ -176,24 +179,31 @@ CREATE TABLE users (
 CREATE TABLE conversations (
   id                   BIGSERIAL PRIMARY KEY,
   telegram_chat_id     BIGINT NOT NULL,
-  user_id              BIGINT NOT NULL REFERENCES users(id),
+  user_id              BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   status               TEXT NOT NULL DEFAULT 'ai_active',
     -- ai_active|handoff_pending|human_active|closed（迁移中加 CHECK）
-  assigned_operator_id BIGINT,
+  assigned_operator_id BIGINT,       -- MVP 单管理员恒为 1（内部 ID）；P1 建 operators 表
   started_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_message_at      TIMESTAMPTZ,
-  closed_at            TIMESTAMPTZ,
-  UNIQUE (telegram_chat_id, user_id)
+  closed_at            TIMESTAMPTZ
 );
+CREATE UNIQUE INDEX one_open_conversation ON conversations (telegram_chat_id, user_id)
+  WHERE status != 'closed';
+  -- 只约束"未关闭会话唯一"——/reset 关旧建新不会违反唯一键
 
 CREATE TABLE messages (
   id                  BIGSERIAL PRIMARY KEY,
-  conversation_id     BIGINT NOT NULL REFERENCES conversations(id),
+  conversation_id     BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   telegram_message_id BIGINT,
+  source_update_id    BIGINT REFERENCES telegram_updates(update_id),
+    -- 产生该消息的 update（人工/系统消息为 NULL）
+  delivery_key        TEXT,
+    -- outbound 投递幂等键：reply:{update_id}|followup:{update_id}|ack:{update_id}|fallback:{update_id}
   direction           TEXT NOT NULL,       -- inbound|outbound
   sender_type         TEXT NOT NULL,       -- user|ai|operator|system
   content             TEXT NOT NULL,
   content_type        TEXT NOT NULL DEFAULT 'text',
+  delivery_status     TEXT,                -- 仅 outbound：sending|sent|failed|uncertain
   answer_status       TEXT,                -- answered|refused|handoff（仅 AI outbound）
   source_chunk_ids    BIGINT[],            -- RAG 引用来源
   model_name          TEXT,
@@ -204,6 +214,12 @@ CREATE TABLE messages (
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX ON messages (conversation_id, created_at);
+CREATE UNIQUE INDEX uniq_inbound_message ON messages (conversation_id, telegram_message_id)
+  WHERE direction = 'inbound';
+  -- 任务重试用 ON CONFLICT DO NOTHING，不产生重复 inbound
+CREATE UNIQUE INDEX uniq_outbound_delivery ON messages (delivery_key)
+  WHERE delivery_key IS NOT NULL;
+  -- 每个投递意图至多一条 outbound；重试按 delivery_key 查 sent/sending 决定跳过或标 uncertain
 
 CREATE TABLE knowledge_documents (
   id           BIGSERIAL PRIMARY KEY,
@@ -221,17 +237,19 @@ CREATE TABLE knowledge_documents (
 CREATE TABLE knowledge_chunks (
   id          BIGSERIAL PRIMARY KEY,
   document_id BIGINT NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+  version     INT NOT NULL DEFAULT 1,      -- 对应 documents.version，重索引原子切换用
   chunk_index INT NOT NULL,
   content     TEXT NOT NULL,
   metadata    JSONB NOT NULL DEFAULT '{}',
-  embedding   vector(1536) NOT NULL
+  embedding   vector(1536) NOT NULL,
+  UNIQUE (document_id, version, chunk_index)   -- 重试/并发重索引不产生重复 chunk
 );
 CREATE INDEX ON knowledge_chunks USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE leads (
   id                BIGSERIAL PRIMARY KEY,
-  user_id           BIGINT NOT NULL REFERENCES users(id),
-  conversation_id   BIGINT NOT NULL REFERENCES conversations(id) UNIQUE,
+  user_id           BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id   BIGINT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
   name              TEXT,
   company           TEXT,
   country           TEXT,
@@ -247,6 +265,7 @@ CREATE TABLE leads (
   grade             TEXT NOT NULL DEFAULT 'low',   -- low|medium|high
   score_reasons     JSONB NOT NULL DEFAULT '[]',
   status            TEXT NOT NULL DEFAULT 'open',  -- open|synced|won|lost
+  version           INT NOT NULL DEFAULT 1,        -- 实质变更 +1，是同步幂等键的组成部分
   external_crm_id   TEXT,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -254,13 +273,16 @@ CREATE TABLE leads (
 
 CREATE TABLE handoffs (
   id              BIGSERIAL PRIMARY KEY,
-  conversation_id BIGINT NOT NULL REFERENCES conversations(id),
+  conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   reason          TEXT NOT NULL,   -- user_request|low_confidence|sensitive|high_intent|manual
   requested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   accepted_at     TIMESTAMPTZ,
   resolved_at     TIMESTAMPTZ,
-  operator_id     BIGINT
+  operator_id     BIGINT           -- MVP 恒为 1（内部管理员 ID，非 Telegram ID）
 );
+CREATE UNIQUE INDEX one_unresolved_handoff ON handoffs (conversation_id)
+  WHERE resolved_at IS NULL;
+  -- 每会话至多一个未解决的接管请求；通知型记录创建即 resolved（见 §9）
 
 CREATE TABLE integration_jobs (
   id               BIGSERIAL PRIMARY KEY,
@@ -273,7 +295,10 @@ CREATE TABLE integration_jobs (
   attempts         INT NOT NULL DEFAULT 0,
   last_error       TEXT,
   next_retry_at    TIMESTAMPTZ,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  picked_at        TIMESTAMPTZ,             -- 处理租约起点，扫描器恢复卡死任务
+  completed_at     TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE llm_providers (           -- 后台可配的模型供应商
@@ -283,6 +308,7 @@ CREATE TABLE llm_providers (           -- 后台可配的模型供应商
   api_key_enc    TEXT NOT NULL,            -- Fernet 密文，绝不存明文
   chat_model     TEXT NOT NULL,
   fallback_model TEXT,
+  supports_json_schema BOOLEAN NOT NULL DEFAULT true,  -- 端点不支持严格 schema 时降级
   is_active      BOOLEAN NOT NULL DEFAULT false,
   last_test_at   TIMESTAMPTZ,
   last_test_ok   BOOLEAN,
@@ -316,10 +342,11 @@ CREATE TABLE audit_logs (
 
 `POST /webhooks/telegram/{bot_secret}`：
 
-1. `bot_secret` 与 `TELEGRAM_WEBHOOK_SECRET` 常量比较（`secrets.compare_digest`），不符返回 404。
+1. 双重校验：URL 路径 `bot_secret` 与请求头 `X-Telegram-Bot-Api-Secret-Token`（setWebhook 时设置的 secret_token）均用 `secrets.compare_digest` 比较，任一不符返回 404。
 2. 解析 body 取 `update_id`；`INSERT INTO telegram_updates ... ON CONFLICT DO NOTHING`，冲突（重复推送）直接返回 `{"ok": true}`。
 3. `arq.enqueue_job("process_update", update_id)`，返回 200。总耗时目标 < 50ms。
-4. 任何内部异常也返回 200（记录错误日志）——绝不让 Telegram 因 5xx 无限重推；失败的 update 状态留在表里可人工重放。
+4. 任何内部异常也返回 200（记录错误日志）——绝不让 Telegram 因 5xx 无限重推。
+5. "落库成功但入队失败"的窗口由 worker 兜底扫描器闭环（见 §6）：update 只要进了表就一定会被处理，**不依赖单次 enqueue 成功**。
 
 非文本消息（图片/语音等）：标记 `status='skipped'`，回复固定文案"目前仅支持文字消息"。
 
@@ -331,39 +358,71 @@ worker 端为确定性的显式管线，每一步可单测：
 
 ```text
 process_update(update_id):
-  0. 取 Redis 锁 conv:{chat_id}（TTL 120s）；拿不到 → defer 重新入队（延迟 2s）
-  1. 加载/创建 user、conversation；保存 inbound message；更新 last_message_at
-  2. 命令分支（不经 LLM）：
-     /start  → 欢迎语 + 简短隐私提示（更新 consent_status）
-     /human  → 触发人工接管（§9），结束
-     /reset  → 关闭当前会话并新建
-  3. 状态检查：conversation.status == human_active
-     → 只通知运营者"用户有新消息"，不回复，结束
-  4. triage（一次 LLM structured output 调用，输入近 6 轮对话）：
-     TriageResult { risk: none|privacy|contract|security|payment|complaint,
-                    purchase_intent: bool, needs_rag: bool, language: str }
-     risk != none → 发送"已为您转接人工"模板 + 触发人工接管(sensitive) → 跳到第 7 步
-  5. 回答分支：
-     a. needs_rag → RAG（§下文）；检索不足 → 拒答模板 + 触发人工接管(low_confidence)，
-        outbound.answer_status='refused'
-     b. 闲聊/寒暄 → 轻量模板式回复，不检索
-  6. 线索分支（triage.purchase_intent 或已有 lead 时执行）：
-     a. 字段提取（§7）→ 合并 → 评分（§8）
-     b. 若有缺失关键字段且不在 declined_fields → 将 extraction 给出的
-        follow_up_question（至多一个）拼接到回复末尾
-     c. grade 升为 high → 触发人工接管(high_intent) + 通知
-     d. lead 有实质变更 → 写 integration_jobs + enqueue sync_lead
-  7. 发送回复（Telegram sendMessage），保存 outbound message（含 tokens/latency/来源）
-  8. 标记 telegram_updates.status='done'；异常 → 'failed' + 记录 error，
-     用户侧发送安全兜底文案"系统繁忙，已通知人工"，并通知运营者
+  0. 原子抢占：UPDATE telegram_updates SET status='processing', picked_at=now()
+     WHERE update_id=$1 AND status IN ('queued','failed')
+     —— 0 行命中说明已被处理或正在处理，直接结束（重复入队无害）
+  1. 取 Redis 会话锁 conv:{chat_id}：TTL 60s、带随机 token、Lua 比对后释放、
+     任务内每 20s 续期；拿不到 → 状态回置 'queued'，defer 2s 重新入队
+  2. 加载/创建 user、conversation；保存 inbound message
+     （唯一索引 + ON CONFLICT DO NOTHING，重试幂等）；更新 last_message_at
+  3. 路由（只决策、不发送——所有分支统一产出 ReplyPlan）：
+     a. 命令分支（不经 LLM）：
+        /start → 欢迎语 + 简短隐私提示（更新 consent_status）
+        /human → 幂等接管：已处于 pending/active 只回"人工已收到通知"；
+                 否则 transition(handoff_pending) + 建 handoff + 回"已通知人工"
+        /reset → 关旧会话建新会话（部分唯一索引允许），回确认语
+     b. 静默态：status ∈ {human_active, handoff_pending}
+        → 通知运营者"用户有新消息"，ReplyPlan 为空
+     c. triage（structured output，输入近 6 轮对话；预算见下，失败按
+        needs_rag=true / risk=none 继续）：
+        TriageResult { risk: none|privacy|contract|security|payment|complaint,
+                       purchase_intent: bool, needs_rag: bool, language: str }
+        risk != none → ReplyPlan = "已为您转接人工"模板 +
+        transition(handoff_pending, sensitive)，不再走 RAG
+     d. needs_rag → RAG（预算 = 总 deadline 剩余时间）；检索不足/生成失败/预算耗尽
+        → 拒答模板 + 写 handoffs(low_confidence) 通知（状态不变），answer_status='refused'
+     e. 闲聊/寒暄 → 轻量模板式回复，不检索
+  4. 统一投递（所有分支唯一的发送出口，两阶段）：对 ReplyPlan 中每条消息，
+     以 delivery_key（reply:{update_id} / ack:{update_id}）落
+     outbound(delivery_status='sending') → sendMessage → 更新 'sent' 并回填
+     telegram_message_id。重试时按 delivery_key 查询：已 'sent' → 跳过；
+     残留 'sending' → 标 'uncertain' 不重发（宁可漏发可人工补），通知运营者
+  5. 标记 update：需要提取线索（triage.purchase_intent 或已有 lead）
+     → status='replied' 并 enqueue extract_lead(update_id)；
+     否则 status='done', processed_at=now()
+  6. 异常处理：仅第 0–4 步的异常 → status='failed' + error + 安全兜底文案
+     （delivery_key fallback:{update_id}，经统一投递）+ 通知运营者；
+     第 5 步之后不再有任何用户可见动作
+
+extract_lead(update_id)  —— 独立任务，回复已送达后执行，失败绝不打扰用户：
+  1. 取同一会话锁；字段提取（§7，超时 30s、重试 1 次、可切 fallback）
+     → 合并 → 评分（§8）
+  2. 缺失关键字段且不在 declined_fields → follow_up_question 以
+     delivery_key followup:{update_id} 经统一投递单独发送
+  3. grade 升为 high → 写 handoffs(high_intent) + 通知（会话状态不变）
+  4. 实质变更 → leads.version+1，写 integration_jobs + enqueue sync_lead
+  5. 成功或最终失败均置 update status='done', processed_at=now()
+     （失败记 error + 通知运营者）；绝不重跑 triage/RAG，绝不发送"系统繁忙"
 ```
 
-LLM 调用失败策略：triage 失败 → 视为 `needs_rag=true, risk=none` 继续；RAG 生成失败 → 走拒答+转人工路径。任何失败都不能让 webhook 消息丢失或无响应。
+LLM 调用失败策略：**用户回复路径（triage/RAG）不做长重试**——triage 失败按默认值继续，RAG 失败走拒答转人工；只有提取/摘要等非用户路径允许重试与 fallback 模型。任何失败都不能让消息丢失或无响应。
+
+**兜底扫描器（arq cron，每 60s）**：统一模式是**先原子重置、再入队**——只入队 `RETURNING` 出来的 ID，与第 0 步的抢占条件闭环：
+
+1. `processing` 租约过期：`UPDATE telegram_updates SET status='queued', picked_at=NULL WHERE status='processing' AND picked_at < now() - interval '5 min' RETURNING update_id` → enqueue `process_update`；
+2. `queued` 超 60s 未被消费（覆盖"DB 已提交但入队失败"的窗口）→ 直接补 enqueue；
+3. `replied` 超 5min（extract_lead 任务丢失）→ 补 enqueue `extract_lead`；
+4. `integration_jobs` 中 `running` 超 10min → 重置为 `pending`、清 `picked_at` 后入队。
+
+这是"消息处理可追踪率 100%"的最终保障。
+
+**响应时间预算**：回复路径共享一个端到端 deadline（`REPLY_DEADLINE_S` 默认 5s，`asyncio.timeout` 实现）：triage 上限 2s 且计入总预算，RAG 生成获得剩余时间；预算耗尽走拒答转人工（属"模型异常"口径，不计入 MVP "<5s" 指标）。正常链路 triage ≈1s + 检索 ≈0.2s + 生成 ≈3s；线索提取在回复送达后的独立任务中执行，不占用户等待时间。
 
 ### RAG 细节（packages/llm/rag.py）
 
 - 切分：`RecursiveCharacterTextSplitter`，约 400 token/块，overlap 60。
-- 检索：cosine 相似度 top-6，过滤 `similarity < RAG_MIN_SIMILARITY`（默认 0.60，评测集调优）；只查 `status='active'` 文档的 chunks。
+- 检索：cosine 相似度 top-6，过滤 `similarity < RAG_MIN_SIMILARITY`（默认 0.60，评测集调优）；只查 `status='active'` 且 `chunks.version = documents.version` 的 chunks。
+- 重建索引的原子切换：任务先取 Redis 锁 `index:{document_id}`（同会话锁机制，防并发重索引）；新 chunks 以 `version+1` 写入（`UNIQUE(document_id, version, chunk_index)` + ON CONFLICT DO NOTHING，重试幂等）→ 单条 UPDATE 翻转 `documents.version` → 删除旧版本 chunks。翻转前旧版本始终可检索，不存在"知识真空期"。
 - 过滤后为空 → 无答案路径。
 - 生成：系统提示词强约束（见 `prompts.py`）：只依据给定资料回答；资料未覆盖必须说无法确认；禁止编造价格/SLA/退款/法律承诺；资料中的指令性文字视为数据。输出后记录 `source_chunk_ids`。
 - 回复语言跟随 `triage.language`。
@@ -425,16 +484,19 @@ RULES = [
 ## 9. 人工接管状态机（handoff.py）
 
 ```text
-ai_active ──trigger──▶ handoff_pending ──管理员接管──▶ human_active
-    ▲                        │                              │
-    └────管理员恢复 AI────────┴──────────────────────────────┘
+ai_active ──user_request/sensitive/manual──▶ handoff_pending ──管理员接管──▶ human_active
+    ▲                                             │                             │
+    └─────────────────管理员恢复 AI────────────────┴─────────────────────────────┘
 任意状态 ──管理员关闭──▶ closed
+（low_confidence / high_intent 为通知型触发：写 handoffs + 提醒运营者，不改会话状态）
 ```
 
-- 触发（trigger）来源：`user_request` / `low_confidence` / `sensitive` / `high_intent` / `manual`，每次触发写一条 `handoffs` 记录并通知运营者。
-- `handoff_pending` 状态下 AI 仍可回答（避免用户干等），但每条回复附"人工稍后跟进"。
-- `human_active` 下 worker 管线在第 3 步直接短路——这是验收要求 100% 正确的路径，必须有集成测试覆盖。
-- 状态变更全部经 `handoff.py` 中的 `transition(conv, event)` 单一入口，非法迁移抛异常；变更写 audit_logs。
+- **静默型触发**（`user_request` / `sensitive` / `manual`）→ 进入 `handoff_pending`：AI 只发一次"已通知人工"确认，此后新消息仅转通知、不再回答——满足 MVP §10.1"用户要求人工后 AI 立即停止自动回复"。
+- **通知型触发**（`low_confidence` / `high_intent`）→ 只写 `handoffs` 记录并提醒运营者，会话保持 `ai_active`：低置信度已用拒答模板回应过，高意向用户正在顺畅对话中，强行静默反而伤转化。通知型记录**创建即 `resolved_at=now()`**（纯提醒，无处理闭环），不占用 `one_unresolved_handoff` 唯一索引。
+- `/human` 幂等：会话已处于 `handoff_pending` / `human_active` 时仅回复"人工已收到通知"，不重复 transition、不新建 handoff（`one_unresolved_handoff` 部分唯一索引兜底防并发）。
+- `human_active` 与 `handoff_pending` 下 worker 管线在第 4 步短路——这是验收要求 100% 正确的路径，必须有集成测试覆盖。
+- 状态变更全部经 `handoff.py` 中的 `transition(conv, event)` 单一入口，非法迁移抛异常；变更写 audit_logs；管理员接管时回填 `accepted_at`（接管确认与"是否停 AI"解耦——停 AI 由状态决定）。
+- MVP 单管理员：`assigned_operator_id` / `operator_id` 恒为 1（内部管理员 ID，非 Telegram ID）；P1 多运营者时再建 operators 表。
 - 管理员在后台发消息（`POST /api/conversations/{id}/messages`）→ api 直接调 Telegram 发送，`sender_type='operator'`。
 
 ---
@@ -472,8 +534,9 @@ ai_active ──trigger──▶ handoff_pending ──管理员接管──▶ 
 ## 11. Google Sheets 同步（sync_lead）
 
 - `ports.py` 定义 `LeadSyncPort.upsert_lead(lead) -> external_id`，`sheets.py` 实现。
-- Sheet 结构：第一行表头（Lead ID、Telegram、Name、Company、…、Score、Grade、Summary、Last Contact、Synced At），按 `Lead ID` 列查找行 → 有则整行更新，无则 append。幂等键 `sheets:lead:{id}`。
-- 任务流程：置 `integration_jobs.status='running'` → 调用 → 成功 `done` 并回填 `leads.external_crm_id`；失败 attempts+1，`next_retry_at = now + 2^attempts 分钟`（arq defer），attempts ≥ 5 → `failed`，通知运营者，后台可手动重试。
+- Sheet 结构：第一行表头（Lead ID、Telegram、Name、Company、…、Score、Grade、Summary、Last Contact、Synced At），按 `Lead ID` 列查找行 → 有则整行更新，无则 append。
+- **幂等键带版本**：`sheets:lead:{id}:v{version}`（`leads.version` 实质变更时 +1）——每次变更都能建新任务，不被首个 job 的唯一键挡住。任务执行时从 DB 读取 lead **当前**状态写入（payload 仅作审计快照），即使乱序执行也只会写入最新数据。
+- 任务流程：置 `status='running', picked_at=now()` → 调用 → 成功 `done` + `completed_at`，回填 `leads.external_crm_id`；失败 attempts+1，`next_retry_at = now + 2^attempts 分钟`（arq defer），attempts ≥ 5 → `failed`，通知运营者，后台可手动重试；`running` 超 10min 由 §6 兜底扫描器恢复。
 - 摘要（Summary 列）：同步时用 LLM 生成 2–3 句对话摘要（失败则留空，不阻塞同步）。
 
 ---
@@ -483,10 +546,11 @@ ai_active ──trigger──▶ handoff_pending ──管理员接管──▶ 
 - 基于 `openai` SDK。配置经 `ProviderConfigSource` 协议解析，优先级：**DB 激活供应商（llm_providers.is_active）→ env 兜底**（`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_CHAT_MODEL`/`LLM_CHAT_MODEL_FALLBACK`）。M1–M7 只有 `EnvConfigSource`；M8 加 `DbConfigSource`：进程内缓存 60s + 激活/修改时 Redis pub/sub 广播失效，worker 无需重启即热切换。
 - api_key 存库用 Fernet 加密（`cryptography`），主密钥 `SETTINGS_ENCRYPTION_KEY` 仅在 env；任何 API 响应与日志只出现末 4 位。
 - `LLM_EMBED_MODEL` 仅 env 配置，不进后台（换 embedding 模型/维度需全量重建向量索引，P1 再做带重索引流程的 UI）。
-- 统一封装 `chat(messages, schema=None, purpose="rag|triage|extract|summary")`：
-  - 超时 30s、重试 1 次、主模型连续失败切换 fallback 模型；
-  - 每次调用记录 purpose、model、tokens、latency、估算成本（写 messages 或日志）；
-  - `schema` 非空时走 structured outputs 并用 Pydantic 校验，校验失败重试一次后抛 `LLMOutputError`。
+- 统一封装 `chat(messages, schema=None, purpose="rag|triage|extract|summary")`，按 purpose 分两档策略：
+  - **用户回复路径**（triage/rag）：共享端到端 deadline（`REPLY_DEADLINE_S`，默认 5s）——triage 上限 2s 且计入总预算，RAG 生成获得剩余时间；不做同调用重试、不切 fallback，超时或失败立即降级（triage 按默认值继续、RAG 走拒答转人工）；
+  - **非用户路径**（extract / summary / 索引，超时 30s）：重试 1 次，连续失败切 fallback 模型；
+  - 每次调用记录 purpose、model、tokens、latency、估算成本（端点缺 usage 字段时记 NULL，不臆造）；
+  - `schema` 非空且供应商 `supports_json_schema` → 严格 structured outputs；否则降级为 json_object 模式 + 提示词约束。两条路径都过 Pydantic 校验，失败修复重试一次后抛 `LLMOutputError`。
 - 测试用 `FakeLLM` 实现同一接口，按 purpose 返回预置结果。
 - **为什么不用 LiteLLM**（已讨论定案）：目标供应商（OpenAI/DeepSeek/Kimi/Qwen/GLM/Groq/OpenRouter/vLLM）全部提供 OpenAI 兼容端点，base_url 抽象已覆盖换供应商需求；purpose 打标、入库记账、Pydantic 校验这层业务封装无论如何都要写，LiteLLM 只是多垫一层大依赖。且不锁门——将来需要多供应商路由/配额时，部署 LiteLLM Proxy（对外即 OpenAI 兼容端点），改 `LLM_BASE_URL` 指过去即可，代码零改动。
 
@@ -497,7 +561,7 @@ ai_active ──trigger──▶ handoff_pending ──管理员接管──▶ 
 ```dotenv
 # Telegram
 TELEGRAM_BOT_TOKEN=
-TELEGRAM_WEBHOOK_SECRET=        # 随机 32+ 字符，URL 路径的一部分
+TELEGRAM_WEBHOOK_SECRET=        # 随机 32+ 字符：URL 路径 + setWebhook secret_token 头双重校验
 OPERATOR_TELEGRAM_CHAT_ID=      # 人工提醒接收者
 
 # LLM（OpenAI 兼容；作为兜底配置——后台配置了激活供应商时以 DB 为准）
@@ -507,8 +571,10 @@ SETTINGS_ENCRYPTION_KEY=        # Fernet 主密钥，加密后台录入的供应
 LLM_CHAT_MODEL=
 LLM_CHAT_MODEL_FALLBACK=
 LLM_EMBED_MODEL=text-embedding-3-small
+ALLOW_PRIVATE_LLM_BASE_URL=false  # 后台配置的 base_url 默认禁内网/云元数据地址；自建 vLLM 时显式打开
 RAG_MIN_SIMILARITY=0.60
 RAG_TOP_K=6
+REPLY_DEADLINE_S=5              # 用户回复路径端到端预算（triage+检索+生成）
 
 # 数据
 DATABASE_URL=postgresql+asyncpg://mercury:***@postgres:5432/mercury
@@ -541,7 +607,11 @@ PUBLIC_HOST=                    # 对外域名（PUBLIC_BASE_URL 的 host 部分
 - 脱敏 processor：email 打码（`t***@example.com`）、任何形如 token/key 的值替换为 `[redacted]`；`TELEGRAM_BOT_TOKEN` 出现在 URL 中的场景（Bot API 调用日志）必须过滤。
 - `GET /health/live`（进程存活）与 `/health/ready`（DB + Redis ping）。
 - 提示词注入防线在代码层落实：用户消息与知识库 chunk 一律放在 user role 内容里，系统规则只在 system prompt；不给模型任何工具/函数可调用（结构化输出不算工具），所有写操作由管线代码完成。
-- 用户数据删除：`DELETE /api/users/by-telegram/{telegram_user_id}`（级联删 conversations/messages/leads，写 audit）；数据保留期由每日 cron 任务（arq cron）按 `DATA_RETENTION_DAYS` 清理。
+- 后台 Cookie：`HttpOnly` + `Secure` + `SameSite=Lax`；写接口要求自定义头（`X-Requested-With: fetch`）作 CSRF 防线——跨站表单无法携带自定义头。
+- 登录限流：每 IP 5 次/分钟（Redis 计数），失败与锁定写 audit_logs。
+- URL 导入 SSRF 防护：仅允许 http/https；DNS 解析后拒绝私网/链路本地/云元数据地址，重定向逐跳复检；响应上限 10MB、超时 20s。上传限制：≤20MB、PDF ≤200 页、解析超时 60s。
+- 后台配置的 LLM base_url 默认同样拒绝内网地址（`ALLOW_PRIVATE_LLM_BASE_URL=true` 显式放开，用于自建推理服务场景）。
+- 用户数据删除：`DELETE /api/users/by-telegram/{telegram_user_id}`——内容表靠 DDL 级联（users→conversations→messages/handoffs、users→leads）；integration_jobs（无外键）与 audit_logs 中该用户相关 entity 的记录（其 metadata 含 lead 字段新旧值）由删除流程显式清理；删除动作本身另记一条匿名 audit。数据保留期由每日 arq cron 按 `DATA_RETENTION_DAYS` 清理。
 
 ---
 
@@ -553,7 +623,15 @@ PUBLIC_HOST=                    # 对外域名（PUBLIC_BASE_URL 的 host 部分
   - `human_active` 下 inbound → 无 AI 回复；
   - 检索无结果 → 拒答文案 + handoff(low_confidence) 记录；
   - 高意向对话 → 评分 ≥60 + 通知调用 + integration_job 创建；
-  - Sheets 打桩抛错 → job 重试计划正确、lead 数据完好。
+  - Sheets 打桩抛错 → job 重试计划正确、lead 数据完好；
+  - 任务中途失败后重试 → inbound 不重复、已发送回复不二次发送（`uncertain` 标记正确）；
+  - `/reset` 后能创建新会话（部分唯一索引验证）；
+  - 兜底扫描器恢复"已落库未入队"与"processing 租约过期"的 update；
+  - lead 第二次变更能生成新的同步任务（版本化幂等键）；
+  - 回复送达后 extraction 失败 → 用户收不到"系统繁忙"、不重跑 RAG，update 仍到 `done`；
+  - 重复 `/human` → 只收到确认文案，不产生第二条未解决 handoff；
+  - 扫描器把超时 `processing` 重置为 `queued` 后，能被再次原子抢占并处理完成；
+  - 同一文档重试/并发重索引不产生重复 chunk（唯一约束 + 文档锁）。
 - **评测**：`scripts/eval_rag.py` 对 30–50 问评测集输出正确率/拒答率报告，作为 RAG_MIN_SIMILARITY 调参依据（对应 MVP 指标 85%/95%）。
 - MVP 文档 §10.1 的每一条必测用例都要能指到一个具体测试函数。
 
@@ -597,7 +675,7 @@ main 开分支保护：CI 全绿才能合并。单人开发也走「短命分支
 
 1. buildx 构建两个镜像——`mercury-app`（api/worker 共用，见 §16）与 `mercury-web`——tag 为 `sha-<short>` 和 `latest`，push GHCR（启用 gha 层缓存）。
 2. SSH 到演示服务器（secrets：`DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY`），执行 `docker compose pull && docker compose up -d`。服务器上的 compose 引用 GHCR 镜像；migration 由 §16 的一次性 alembic 服务在启动时执行。
-3. 部署后验证：curl `https://$PUBLIC_BASE_URL/health/ready`，非 200 则 workflow 标红。
+3. 部署后验证：`curl --fail --retry 12 --retry-delay 5 --retry-all-errors "$PUBLIC_BASE_URL/health/ready"`（`PUBLIC_BASE_URL` 本身已含 `https://`，不要重复拼协议）。服务器部署脚本在 pull 前记录当前运行的镜像 tag，健康检查失败即用该 tag 自动回滚，workflow 标红。
 4. **回滚**：`workflow_dispatch` 接受输入 `image_tag`（默认 `latest`）——手动触发并填上一个可用的 `sha-*` tag 即回滚，不需要额外机制。
 
 约定：服务器上的 `.env`（含所有真实密钥）只存在于服务器，绝不进仓库或 Actions secrets；Actions secrets 只放部署 SSH 三件套。

@@ -7,6 +7,8 @@
 - 目标客户：已经使用 Telegram 承接客户咨询的海外 AI SaaS、API、开发者工具团队
 - 产品类型：先做可定制交付的服务，验证后再决定是否 SaaS 化
 
+> **实现说明（2026-08-29）**：本文档是需求与商业边界的事实来源；§6 技术架构仅为初始建议，实现级决策以 [technical-design.md](./technical-design.md) 为准（已定案的差异包括：不用 LangGraph、LLM 管线全部在 worker 执行、CRM 首选 Google Sheets、编排为纯 Python 显式管线等）。两者冲突时以技术方案为准。
+
 ---
 
 ## 1. 项目结论与边界
