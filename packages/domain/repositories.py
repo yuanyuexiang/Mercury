@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from domain.models import (
     AuditLog,
     Conversation,
+    Handoff,
     IntegrationJob,
     KnowledgeChunk,
     KnowledgeDocument,
@@ -488,3 +489,62 @@ async def create_integration_job(
     )
     result = await session.execute(stmt)
     return bool(cast(CursorResult[Any], result).rowcount)
+
+
+# ---------- handoffs（§9，M6） ----------
+
+
+async def create_handoff(
+    session: AsyncSession,
+    conversation_id: int,
+    reason: str,
+    resolved: bool = False,
+    operator_id: int | None = None,
+) -> bool:
+    """未解决记录受 one_unresolved_handoff 部分唯一索引约束（并发幂等）；
+    通知型记录创建即 resolved，不受该索引限制。"""
+    values: dict[str, Any] = {
+        "conversation_id": conversation_id,
+        "reason": reason,
+        "operator_id": operator_id,
+    }
+    if resolved:
+        values["resolved_at"] = func.now()
+        await session.execute(pg_insert(Handoff).values(**values))
+        return True
+    stmt = (
+        pg_insert(Handoff)
+        .values(**values)
+        .on_conflict_do_nothing(
+            index_elements=["conversation_id"], index_where=text("resolved_at IS NULL")
+        )
+    )
+    result = await session.execute(stmt)
+    return bool(cast(CursorResult[Any], result).rowcount)
+
+
+async def get_unresolved_handoff(session: AsyncSession, conversation_id: int) -> Handoff | None:
+    stmt = select(Handoff).where(
+        Handoff.conversation_id == conversation_id, Handoff.resolved_at.is_(None)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def accept_unresolved_handoff(
+    session: AsyncSession, conversation_id: int, operator_id: int
+) -> None:
+    await session.execute(
+        update(Handoff)
+        .where(Handoff.conversation_id == conversation_id, Handoff.resolved_at.is_(None))
+        .values(accepted_at=func.now(), operator_id=operator_id)
+    )
+
+
+async def resolve_unresolved_handoff(
+    session: AsyncSession, conversation_id: int, operator_id: int
+) -> None:
+    await session.execute(
+        update(Handoff)
+        .where(Handoff.conversation_id == conversation_id, Handoff.resolved_at.is_(None))
+        .values(resolved_at=func.now(), operator_id=func.coalesce(Handoff.operator_id, operator_id))
+    )

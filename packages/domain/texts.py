@@ -9,6 +9,11 @@ RESET_DONE = "会话已重新开始。请问有什么可以帮您？"
 
 HUMAN_ACK = "已通知人工客服，稍后会有同事跟进。"
 
+HUMAN_ALREADY = (
+    "人工客服已收到通知，正在赶来，请稍候。\n"
+    "The team has already been notified — someone will be with you shortly."
+)
+
 NON_TEXT_UNSUPPORTED = "目前仅支持文字消息，请用文字描述您的问题。"
 
 FALLBACK_ERROR = "系统繁忙，已通知人工客服跟进，抱歉给您带来不便。"

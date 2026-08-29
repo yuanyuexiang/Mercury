@@ -10,7 +10,7 @@ from typing import Literal, Protocol
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from domain import lead_merge, repositories, scoring, texts
+from domain import handoff, lead_merge, repositories, scoring, texts
 from domain.models import Conversation, Message, TelegramUpdate
 from domain.schemas import (
     Deadline,
@@ -97,17 +97,33 @@ def _route_command(command: str, update_id: int, conversation: Conversation) -> 
                 )
             ]
         )
-    if command == "/human":
-        # TODO(M6): transition(handoff_pending) + handoffs 记录；当前仅通知 + 确认
+    return None
+
+
+async def _handle_human_command(
+    session: AsyncSession, conversation: Conversation, update_id: int
+) -> ReplyPlan:
+    """/human 幂等接管（§9）：已在 pending/active 只回确认，不重复 transition、不新建记录。"""
+    if conversation.status in handoff.SILENT_STATUSES:
         return ReplyPlan(
             messages=[
                 PlannedMessage(
-                    delivery_key=f"reply:{update_id}", text=texts.HUMAN_ACK, sender_type="system"
+                    delivery_key=f"reply:{update_id}",
+                    text=texts.HUMAN_ALREADY,
+                    sender_type="system",
                 )
-            ],
-            notify_operator=f"用户请求人工（会话 {conversation.id}）",
+            ]
         )
-    return None
+    await handoff.transition(session, conversation, "request_human", reason="user_request")
+    await session.commit()
+    return ReplyPlan(
+        messages=[
+            PlannedMessage(
+                delivery_key=f"reply:{update_id}", text=texts.HUMAN_ACK, sender_type="system"
+            )
+        ],
+        notify_operator=f"用户请求人工（会话 {conversation.id}）",
+    )
 
 
 async def _decide(
@@ -147,7 +163,9 @@ async def _decide(
     needs_extraction = tri.purchase_intent or existing_lead is not None
 
     if tri.risk != "none":
-        # TODO(M6): transition(handoff_pending, sensitive)；当前先模板 + 通知
+        # 静默型触发（§9）：进入 handoff_pending，本条模板是"一次确认"，后续消息只转通知
+        await handoff.transition(session, conversation, "request_human", reason="sensitive")
+        await session.commit()
         return ReplyPlan(
             messages=[
                 PlannedMessage(
@@ -177,7 +195,8 @@ async def _decide(
         ans = RagAnswer(refused=True)
 
     if ans.refused or not ans.text:
-        # TODO(M6): 写 handoffs(low_confidence) 通知型记录；当前先通知运营者
+        # 通知型触发（§9）：写记录 + 提醒，会话保持 ai_active
+        await handoff.notify_only(session, conversation.id, "low_confidence")
         return ReplyPlan(
             messages=[
                 PlannedMessage(
@@ -309,33 +328,57 @@ async def run_process_update(
                     )
                 await session.commit()
 
+                in_human_hands = conversation.status in handoff.SILENT_STATUSES
                 command: str | None = None
                 if text_content is None:
-                    plan = ReplyPlan(
-                        messages=[
-                            PlannedMessage(
-                                delivery_key=f"reply:{update_id}",
-                                text=texts.NON_TEXT_UNSUPPORTED,
-                                sender_type="system",
-                            )
-                        ],
-                        final_status="skipped",
-                    )
+                    if in_human_hands:
+                        # 人工接管中：图片等非文本直接转人工，不发"仅支持文字"打扰
+                        plan = ReplyPlan(
+                            final_status="skipped",
+                            notify_operator=(
+                                f"人工接管中，用户发来非文本消息（会话 {conversation.id}）"
+                            ),
+                        )
+                    else:
+                        plan = ReplyPlan(
+                            messages=[
+                                PlannedMessage(
+                                    delivery_key=f"reply:{update_id}",
+                                    text=texts.NON_TEXT_UNSUPPORTED,
+                                    sender_type="system",
+                                )
+                            ],
+                            final_status="skipped",
+                        )
                 else:
                     stripped = text_content.strip()
                     command = stripped.split()[0] if stripped.startswith("/") else None
-                    routed = _route_command(command, update_id, conversation) if command else None
-                    if routed is not None:
-                        plan = routed
+                    if command == "/human":
+                        plan = await _handle_human_command(session, conversation, update_id)
                     else:
-                        plan = await _decide(
-                            session,
-                            brain,
-                            conversation,
-                            update_id,
-                            text_content,
-                            reply_deadline_s,
+                        routed = (
+                            _route_command(command, update_id, conversation) if command else None
                         )
+                        if routed is not None:
+                            plan = routed
+                        elif in_human_hands:
+                            # §6 第 3b 步 / §9：静默态下 AI 不回复，仅转通知——
+                            # 这是验收要求 100% 正确的路径
+                            plan = ReplyPlan(
+                                notify_operator=(
+                                    f"人工接管中，用户有新消息（会话 {conversation.id}）："
+                                    f"{text_content[:80]}"
+                                )
+                            )
+                        else:
+                            plan = await _decide(
+                                session,
+                                brain,
+                                conversation,
+                                update_id,
+                                text_content,
+                                reply_deadline_s,
+                            )
 
                 if command == "/reset":
                     await repositories.close_conversation(session, conversation.id)
@@ -490,7 +533,9 @@ async def run_extract_lead(
                     )
 
                 if result.grade == "high" and old_grade != "high":
-                    # TODO(M6): 写 handoffs(high_intent) 通知型记录
+                    # 通知型触发（§9）：写记录不改状态
+                    await handoff.notify_only(session, conversation.id, "high_intent")
+                    await session.commit()
                     await sender.notify_operator(
                         f"🔥 高意向线索（会话 {conversation.id}）：score={result.score}，"
                         f"理由 {', '.join(result.reasons)}"
