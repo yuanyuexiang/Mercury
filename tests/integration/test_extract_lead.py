@@ -37,7 +37,8 @@ async def test_high_intent_flow(session_factory, locker, sender, brain, extracto
     )
     extractor.result = HIGH_INTENT_EXTRACTION
 
-    assert await run_extract_lead(session_factory, locker, sender, extractor, 401) == "done"
+    outcome, job_id = await run_extract_lead(session_factory, locker, sender, extractor, 401)
+    assert outcome == "done" and job_id is not None
 
     async with session_factory() as session:
         lead = (await session.execute(select(Lead))).scalar_one()
@@ -69,7 +70,7 @@ async def test_followup_question_sent(session_factory, locker, sender, brain, ex
     extractor.result = LeadExtraction(
         company="Beta Inc", follow_up_question="方便留一个工作邮箱吗？"
     )
-    assert await run_extract_lead(session_factory, locker, sender, extractor, 402) == "done"
+    assert (await run_extract_lead(session_factory, locker, sender, extractor, 402))[0] == "done"
 
     assert sender.sent[-1][1] == "方便留一个工作邮箱吗？"
     async with session_factory() as session:
@@ -92,7 +93,7 @@ async def test_no_followup_when_declined(session_factory, locker, sender, brain,
         follow_up_question="预算大概多少呢？",  # LLM 违规给了问题，代码层兜底不发
     )
     sent_before = len(sender.sent)
-    assert await run_extract_lead(session_factory, locker, sender, extractor, 403) == "done"
+    assert (await run_extract_lead(session_factory, locker, sender, extractor, 403))[0] == "done"
     assert len(sender.sent) == sent_before, "不应有追问消息"
     async with session_factory() as session:
         lead = (await session.execute(select(Lead))).scalar_one()
@@ -107,7 +108,8 @@ async def test_extract_failure_never_disturbs_user(
     extractor.raise_error = True
     sent_before = len(sender.sent)
 
-    assert await run_extract_lead(session_factory, locker, sender, extractor, 404) == "done"
+    outcome, job_id = await run_extract_lead(session_factory, locker, sender, extractor, 404)
+    assert outcome == "done" and job_id is None
     assert len(sender.sent) == sent_before
     assert any("线索提取失败" in n for n in sender.notices)
     async with session_factory() as session:
@@ -120,7 +122,7 @@ async def test_skip_when_not_replied(session_factory, locker, sender, extractor)
     async with session_factory() as session:
         await repositories.insert_update(session, 405, tg_update(405, "hi"))
         await session.commit()
-    assert await run_extract_lead(session_factory, locker, sender, extractor, 405) == "skipped"
+    assert (await run_extract_lead(session_factory, locker, sender, extractor, 405))[0] == "skipped"
     assert extractor.calls == []
 
 
@@ -132,7 +134,8 @@ async def test_no_change_no_new_job(session_factory, locker, sender, brain, extr
 
     # 同会话再来一条消息，提取结果与已存内容完全一致
     await _seed_replied(session_factory, locker, sender, brain, 407, "对，就这些")
-    assert await run_extract_lead(session_factory, locker, sender, extractor, 407) == "done"
+    outcome, job_id = await run_extract_lead(session_factory, locker, sender, extractor, 407)
+    assert outcome == "done" and job_id is None, "无变更不应建新任务"
 
     async with session_factory() as session:
         lead = (await session.execute(select(Lead))).scalar_one()

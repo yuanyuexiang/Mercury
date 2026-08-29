@@ -26,7 +26,28 @@ async def sweep(ctx: dict[str, Any]) -> dict[str, int]:
     for update_id in replied_ids:
         await ctx["redis"].enqueue_job("extract_lead", update_id, None)
 
-    # TODO(M7): ④ integration_jobs running 超 10min → 重置 pending 后入队
-    if reset_ids or stale_ids or replied_ids:
-        logger.info("sweeper_recovered", reset=reset_ids, stale=stale_ids, replied=replied_ids)
-    return {"reset": len(reset_ids), "stale": len(stale_ids), "replied": len(replied_ids)}
+    # ④ integration_jobs：running 超 10min 先原子重置为 pending 再入队；
+    #    pending 入队丢失（新建未消费 / 退避到期未重入队）→ 补 enqueue（§11）
+    async with session_factory() as session:
+        job_reset_ids = await repositories.reset_expired_running_jobs(session, lease_minutes=10)
+        await session.commit()
+        job_stale_ids = await repositories.stale_pending_job_ids(session, grace_seconds=300)
+    for job_id in set(job_reset_ids) | set(job_stale_ids):
+        await ctx["redis"].enqueue_job("sync_lead", job_id, None)
+
+    recovered = reset_ids or stale_ids or replied_ids or job_reset_ids or job_stale_ids
+    if recovered:
+        logger.info(
+            "sweeper_recovered",
+            reset=reset_ids,
+            stale=stale_ids,
+            replied=replied_ids,
+            job_reset=job_reset_ids,
+            job_stale=job_stale_ids,
+        )
+    return {
+        "reset": len(reset_ids),
+        "stale": len(stale_ids),
+        "replied": len(replied_ids),
+        "jobs": len(set(job_reset_ids) | set(job_stale_ids)),
+    }

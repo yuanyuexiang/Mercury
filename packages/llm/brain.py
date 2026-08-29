@@ -1,12 +1,15 @@
-"""Brain：编排层的 LLM 依赖聚合（triage + 受约束回答），实现 domain.orchestrator.Brain 协议。"""
+"""Brain：编排层的 LLM 依赖聚合（triage / 受约束回答 / CRM 摘要），实现 domain 协议。"""
 
 from domain.config import Settings
 from domain.schemas import Deadline, RagAnswer, TriageResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm.client import ChatClient, Embedder, build_chat_client, build_embedder
+from llm.prompts import SUMMARY_SYSTEM
 from llm.rag import generate_answer
 from llm.triage import run_triage
+
+SUMMARY_TIMEOUT_S = 30.0
 
 
 class RagBrain:
@@ -37,6 +40,21 @@ class RagBrain:
             top_k=self._settings.rag_top_k,
             min_similarity=self._settings.rag_min_similarity,
         )
+
+
+class ConversationSummarizer:
+    """CRM 摘要（§11）：purpose="summary" 非用户路径（30s、重试、可切 fallback）。"""
+
+    def __init__(self, chat: ChatClient) -> None:
+        self._chat = chat
+
+    async def summarize(self, history: list[dict[str, str]]) -> str:
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": SUMMARY_SYSTEM},
+            *history[-12:],
+        ]
+        result = await self._chat.chat(messages, purpose="summary", timeout_s=SUMMARY_TIMEOUT_S)
+        return (result.content or "").strip()
 
 
 def build_brain(settings: Settings) -> RagBrain | None:

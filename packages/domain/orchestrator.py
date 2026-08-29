@@ -5,13 +5,14 @@ domain 不 import aiogram/arq/redis/openai 实现。
 """
 
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime
 from typing import Literal, Protocol
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from domain import handoff, lead_merge, repositories, scoring, texts
-from domain.models import Conversation, Message, TelegramUpdate
+from domain.models import Conversation, Lead, Message, TelegramUpdate, User
 from domain.schemas import (
     Deadline,
     LeadExtraction,
@@ -64,11 +65,27 @@ class LeadExtractor(Protocol):
     ) -> LeadExtraction: ...
 
 
+class LeadSync(Protocol):
+    """integrations.sheets.GoogleSheetsLeadSync 实现；测试用 FakeSyncPort（§11）。"""
+
+    async def upsert_lead(self, row: dict[str, object]) -> str: ...
+
+
+class Summarizer(Protocol):
+    """llm.brain.ConversationSummarizer 实现（§11 摘要列）。"""
+
+    async def summarize(self, history: list[dict[str, str]]) -> str: ...
+
+
 SessionFactory = async_sessionmaker[AsyncSession]
 
 PipelineOutcome = Literal["done", "replied", "locked", "duplicate", "failed"]
 
 ExtractOutcome = Literal["done", "locked", "skipped"]
+
+SyncOutcome = Literal["done", "retry", "failed", "skipped"]
+
+SYNC_MAX_ATTEMPTS = 5
 
 
 def _history_from_messages(messages: list[Message]) -> list[dict[str, str]]:
@@ -443,16 +460,17 @@ async def run_extract_lead(
     sender: MessageSender,
     extractor: LeadExtractor | None,
     update_id: int,
-) -> ExtractOutcome:
+) -> tuple[ExtractOutcome, int | None]:
     """extract_lead 任务（§6）：回复已送达后执行，失败绝不打扰用户。
 
     提取 → 合并 → 评分 → 追问（单独一条消息）→ 高意向通知 → 实质变更建同步任务；
     成功或最终失败均把 update 收敛到 done，绝不重跑 triage/RAG、绝不发"系统繁忙"。
+    返回 (outcome, 新建同步任务的 job_id)；job_id 非 None 时由 wrapper 入队 sync_lead。
     """
     async with session_factory() as session:
         row = await session.get(TelegramUpdate, update_id)
         if row is None or row.status != "replied":
-            return "skipped"
+            return "skipped", None
         payload = row.payload
 
     message = payload.get("message") or {}
@@ -462,11 +480,11 @@ async def run_extract_lead(
         async with session_factory() as session:
             await repositories.mark_update(session, update_id, "done")
             await session.commit()
-        return "done"
+        return "done", None
 
     async with locker.hold(chat_id) as acquired:
         if not acquired:
-            return "locked"  # 状态保持 replied，由重入队/扫描器再试
+            return "locked", None  # 状态保持 replied，由重入队/扫描器再试
 
         async with session_factory() as session:
             try:
@@ -475,7 +493,7 @@ async def run_extract_lead(
                 if conversation is None:  # 会话已被 /reset 关闭等
                     await repositories.mark_update(session, update_id, "done")
                     await session.commit()
-                    return "done"
+                    return "done", None
 
                 lead = await repositories.get_or_create_lead(session, user.id, conversation.id)
                 await session.commit()
@@ -541,8 +559,9 @@ async def run_extract_lead(
                         f"理由 {', '.join(result.reasons)}"
                     )
 
+                job_id: int | None = None
                 if substantial_change:
-                    await repositories.create_integration_job(
+                    job_id = await repositories.create_integration_job(
                         session,
                         integration_type="google_sheets",
                         entity_type="lead",
@@ -551,11 +570,10 @@ async def run_extract_lead(
                         payload={**merged, "score": result.score, "grade": result.grade},
                     )
                     await session.commit()
-                    # TODO(M7): enqueue sync_lead(job)——worker 注册 sync_lead 后开启
 
                 await repositories.mark_update(session, update_id, "done")
                 await session.commit()
-                return "done"
+                return "done", job_id
             except Exception as exc:
                 logger.exception("extract_lead_failed", update_id=update_id)
                 await session.rollback()
@@ -569,4 +587,118 @@ async def run_extract_lead(
                     )
                 except Exception:
                     logger.exception("operator_notify_failed", update_id=update_id)
-                return "done"
+                return "done", None
+
+
+def _build_sync_row(
+    lead: Lead, user: User, conversation: Conversation, summary: str
+) -> dict[str, object]:
+    """§11：任务执行时从 DB 读 lead 当前状态组装（payload 仅作审计快照），乱序执行无害。"""
+    telegram = f"@{user.username}" if user.username else str(user.telegram_user_id)
+    last_contact = (
+        conversation.last_message_at.isoformat(timespec="seconds")
+        if conversation.last_message_at
+        else ""
+    )
+    return {
+        "lead_id": lead.id,
+        "telegram": telegram,
+        "name": lead.name,
+        "company": lead.company,
+        "country": lead.country,
+        "business_email": lead.business_email,
+        "requirement": lead.requirement,
+        "team_size": lead.team_size,
+        "budget_range": lead.budget_range,
+        "purchase_timeline": lead.purchase_timeline,
+        "integrations": ", ".join(lead.integrations or []),
+        "notes": lead.notes,
+        "score": lead.score,
+        "grade": lead.grade,
+        "summary": summary,
+        "last_contact": last_contact,
+        "synced_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
+async def run_sync_lead(
+    session_factory: SessionFactory,
+    sync_port: LeadSync | None,
+    summarizer: Summarizer | None,
+    sender: MessageSender,
+    job_id: int,
+) -> tuple[SyncOutcome, int | None]:
+    """sync_lead 任务（§11）：原子抢占 → 读最新 lead → 摘要 → upsert → 完成/退避重试。
+
+    返回 (outcome, retry_delay_seconds)；outcome=="retry" 时由 wrapper 按 delay 重入队。
+    失败退避 2^attempts 分钟，attempts ≥ SYNC_MAX_ATTEMPTS 置 failed 并通知运营者；
+    原始 lead 数据永不因同步失败而丢失。
+    """
+    async with session_factory() as session:
+        job = await repositories.claim_integration_job(session, job_id)
+        await session.commit()
+    if job is None:
+        return "skipped", None  # 已完成/进行中/已失败
+
+    try:
+        async with session_factory() as session:
+            lead = await repositories.get_lead(session, job.entity_id)
+            if lead is None:
+                await repositories.complete_integration_job(session, job.id)
+                await session.commit()
+                logger.warning("sync_lead_missing_lead", job_id=job.id, lead_id=job.entity_id)
+                return "done", None
+            user = await session.get(User, lead.user_id)
+            conversation = await session.get(Conversation, lead.conversation_id)
+            assert user is not None and conversation is not None
+
+            summary = ""
+            if summarizer is not None:
+                try:
+                    history = _history_from_messages(
+                        await repositories.get_recent_messages(
+                            session, lead.conversation_id, limit=20
+                        )
+                    )
+                    summary = await summarizer.summarize(history)
+                except Exception:
+                    logger.warning("summary_failed_continuing", job_id=job.id)
+
+            row = _build_sync_row(lead, user, conversation, summary)
+
+        if sync_port is None:
+            raise RuntimeError(
+                "google_sheets 未配置（GOOGLE_SERVICE_ACCOUNT_JSON / LEADS_SPREADSHEET_ID）"
+            )
+        external_id = await sync_port.upsert_lead(row)
+
+        async with session_factory() as session:
+            await repositories.complete_integration_job(session, job.id)
+            await repositories.update_lead(
+                session, lead.id, {"external_crm_id": external_id, "status": "synced"}
+            )
+            await session.commit()
+        logger.info("sync_lead_done", job_id=job.id, lead_id=lead.id, external_id=external_id)
+        return "done", None
+
+    except Exception as exc:
+        attempts = job.attempts + 1
+        logger.warning("sync_lead_failed", job_id=job.id, attempts=attempts, error=repr(exc))
+        async with session_factory() as session:
+            if attempts >= SYNC_MAX_ATTEMPTS:
+                await repositories.fail_integration_job(session, job.id, attempts, repr(exc))
+                await session.commit()
+                try:
+                    await sender.notify_operator(
+                        f"⚠️ CRM 同步最终失败（job {job.id}，lead {job.entity_id}）："
+                        f"{exc!r}。后台可手动重试。"
+                    )
+                except Exception:
+                    logger.exception("operator_notify_failed", job_id=job.id)
+                return "failed", None
+            delay_seconds = (2**attempts) * 60
+            await repositories.retry_integration_job(
+                session, job.id, attempts, repr(exc), delay_seconds
+            )
+            await session.commit()
+            return "retry", delay_seconds

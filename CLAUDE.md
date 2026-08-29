@@ -15,7 +15,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 当前进度
 
-M1 脚手架、M2 消息闭环骨架、M3 知识库（2026-08-29）、M4 受约束 RAG、M5 线索、M6 人工接管（2026-08-30）已完成。下一步：M7 Sheets 同步（技术方案 §18）。
+M1 脚手架、M2 消息闭环骨架、M3 知识库（2026-08-29）、M4 受约束 RAG、M5 线索、M6 人工接管、M7 Sheets 同步（2026-08-30）已完成。下一步：M8 后台与部署（技术方案 §18）。
+
+M7 说明：`run_sync_lead` 原子抢占（pending→running）→ 从 DB 读**最新** lead 组装行（payload 仅审计快照，乱序无害）→ LLM 摘要（失败不阻塞）→ `LeadSync` 端口 upsert → done + 回填 external_crm_id/status=synced；失败退避 2^attempts 分钟回 pending，≥5 次置 failed 并通知。gspread 实现在 `integrations/sheets.py`（按 Lead ID 列找行、to_thread 包同步库）；凭据未配置时任务走 retry 路径（配好即恢复）。扫描器④（running 超时重置 + pending 入队丢失补偿）已实装。**真实 Google Sheet 验证需要 Service Account**：`.env` 配 `GOOGLE_SERVICE_ACCOUNT_JSON`（路径或 base64）+ `LEADS_SPREADSHEET_ID`，并把表共享给 service account 邮箱。
 
 M6 说明：状态机在 `domain/handoff.py`——纯函数迁移表 `next_status()` + 唯一变更入口 `transition()`（非法迁移抛 HandoffError，变更写 audit）；静默型触发（user_request/sensitive/manual）→ handoff_pending，通知型（low_confidence/high_intent）创建即 resolved 不改状态；/human 幂等；静默态下非文本消息也只转通知不回"仅支持文字"。管理端 accept/resume_ai/close 的 API 在 M8 挂接（直接调 transition）。坑：structlog 的 kwarg 不能叫 `event`（与事件名参数冲突）。
 

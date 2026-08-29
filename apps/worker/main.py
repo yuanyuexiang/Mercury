@@ -10,8 +10,9 @@ from arq import cron
 from arq.connections import RedisSettings
 from domain.config import get_settings
 from integrations.locks import RedisLock
+from integrations.sheets import build_lead_sync
 from integrations.telegram import build_sender
-from llm.brain import RagBrain
+from llm.brain import ConversationSummarizer, RagBrain
 from llm.client import build_chat_client, build_embedder
 from llm.extraction import LlmLeadExtractor
 from observability.logging import configure_logging
@@ -21,6 +22,7 @@ from worker.tasks.extract_lead import extract_lead
 from worker.tasks.index_document import index_document
 from worker.tasks.process_update import process_update
 from worker.tasks.sweeper import sweep
+from worker.tasks.sync_lead import sync_lead
 
 
 async def on_startup(ctx: dict[str, Any]) -> None:
@@ -41,6 +43,8 @@ async def on_startup(ctx: dict[str, Any]) -> None:
     ctx["embedder"] = embedder  # None → 索引任务明确失败
     ctx["brain"] = RagBrain(chat, embedder, settings) if chat and embedder else None
     ctx["extractor"] = LlmLeadExtractor(chat) if chat else None
+    ctx["summarizer"] = ConversationSummarizer(chat) if chat else None
+    ctx["sync_port"] = build_lead_sync(settings)  # None → 同步任务明确失败并通知
 
 
 async def on_shutdown(ctx: dict[str, Any]) -> None:
@@ -50,7 +54,7 @@ async def on_shutdown(ctx: dict[str, Any]) -> None:
 
 
 class WorkerSettings:
-    functions = [process_update, extract_lead, index_document]
+    functions = [process_update, extract_lead, index_document, sync_lead]
     cron_jobs = [cron(sweep, second=0)]  # 每分钟一次（§6 兜底扫描器）
     on_startup = on_startup
     on_shutdown = on_shutdown

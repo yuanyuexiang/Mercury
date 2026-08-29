@@ -474,8 +474,8 @@ async def create_integration_job(
     entity_id: int,
     idempotency_key: str,
     payload: dict[str, Any],
-) -> bool:
-    """版本化幂等键（§11）：已存在返回 False。"""
+) -> int | None:
+    """版本化幂等键（§11）：新建返回 job id，已存在返回 None。"""
     stmt = (
         pg_insert(IntegrationJob)
         .values(
@@ -486,9 +486,10 @@ async def create_integration_job(
             payload=payload,
         )
         .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        .returning(IntegrationJob.id)
     )
-    result = await session.execute(stmt)
-    return bool(cast(CursorResult[Any], result).rowcount)
+    row = (await session.execute(stmt)).first()
+    return row[0] if row else None
 
 
 # ---------- handoffs（§9，M6） ----------
@@ -548,3 +549,85 @@ async def resolve_unresolved_handoff(
         .where(Handoff.conversation_id == conversation_id, Handoff.resolved_at.is_(None))
         .values(resolved_at=func.now(), operator_id=func.coalesce(Handoff.operator_id, operator_id))
     )
+
+
+async def claim_integration_job(session: AsyncSession, job_id: int) -> IntegrationJob | None:
+    """原子抢占：仅 pending 可进入 running（与扫描器④的重置闭环，§11）。"""
+    stmt = (
+        update(IntegrationJob)
+        .where(IntegrationJob.id == job_id, IntegrationJob.status == "pending")
+        .values(status="running", picked_at=func.now(), updated_at=func.now())
+        .returning(IntegrationJob)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def complete_integration_job(session: AsyncSession, job_id: int) -> None:
+    await session.execute(
+        update(IntegrationJob)
+        .where(IntegrationJob.id == job_id)
+        .values(status="done", completed_at=func.now(), updated_at=func.now(), last_error=None)
+    )
+
+
+async def retry_integration_job(
+    session: AsyncSession, job_id: int, attempts: int, error: str, delay_seconds: int
+) -> None:
+    """失败退避（§11）：回到 pending 并设 next_retry_at，等待重入队/扫描器兜底。"""
+    next_retry = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+    await session.execute(
+        update(IntegrationJob)
+        .where(IntegrationJob.id == job_id)
+        .values(
+            status="pending",
+            attempts=attempts,
+            last_error=error,
+            next_retry_at=next_retry,
+            picked_at=None,
+            updated_at=func.now(),
+        )
+    )
+
+
+async def fail_integration_job(
+    session: AsyncSession, job_id: int, attempts: int, error: str
+) -> None:
+    await session.execute(
+        update(IntegrationJob)
+        .where(IntegrationJob.id == job_id)
+        .values(
+            status="failed",
+            attempts=attempts,
+            last_error=error,
+            picked_at=None,
+            updated_at=func.now(),
+        )
+    )
+
+
+async def reset_expired_running_jobs(session: AsyncSession, lease_minutes: int = 10) -> list[int]:
+    """兜底扫描器④：running 超时（worker 崩溃）原子重置为 pending，返回待入队 ID（§6/§11）。"""
+    deadline = datetime.now(UTC) - timedelta(minutes=lease_minutes)
+    stmt = (
+        update(IntegrationJob)
+        .where(IntegrationJob.status == "running", IntegrationJob.picked_at < deadline)
+        .values(status="pending", picked_at=None, updated_at=func.now())
+        .returning(IntegrationJob.id)
+    )
+    return [row[0] for row in (await session.execute(stmt)).fetchall()]
+
+
+async def stale_pending_job_ids(session: AsyncSession, grace_seconds: int = 300) -> list[int]:
+    """兜底扫描器④'：pending 但入队丢失（新建未消费 / 退避到期未重入队）→ 补 enqueue。"""
+    now = datetime.now(UTC)
+    deadline = now - timedelta(seconds=grace_seconds)
+    stmt = select(IntegrationJob.id).where(
+        IntegrationJob.status == "pending",
+        ((IntegrationJob.next_retry_at.is_(None)) & (IntegrationJob.created_at < deadline))
+        | (IntegrationJob.next_retry_at < deadline),
+    )
+    return [row[0] for row in (await session.execute(stmt)).fetchall()]
+
+
+async def get_lead(session: AsyncSession, lead_id: int) -> Lead | None:
+    return await session.get(Lead, lead_id)

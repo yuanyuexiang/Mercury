@@ -163,6 +163,45 @@ def extractor() -> FakeExtractor:
     return FakeExtractor()
 
 
+class FakeSyncPort:
+    """LeadSync 协议替身：按 lead_id 幂等存 row；可配置先失败 N 次再成功（断网模拟）。"""
+
+    def __init__(self) -> None:
+        self.rows: dict[int, dict[str, Any]] = {}
+        self.fail_times = 0
+        self.calls = 0
+
+    async def upsert_lead(self, row: dict[str, Any]) -> str:
+        self.calls += 1
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise ConnectionError("sheets 网络故障（模拟）")
+        lead_id = int(str(row["lead_id"]))
+        self.rows[lead_id] = row
+        return f"row:{lead_id + 1}"
+
+
+class FakeSummarizer:
+    def __init__(self) -> None:
+        self.text = "客户来自测试公司，需要客服机器人，等待报价。"
+        self.raise_error = False
+
+    async def summarize(self, history: list[dict[str, str]]) -> str:
+        if self.raise_error:
+            raise RuntimeError("summary boom")
+        return self.text
+
+
+@pytest.fixture
+def sync_port() -> FakeSyncPort:
+    return FakeSyncPort()
+
+
+@pytest.fixture
+def summarizer() -> FakeSummarizer:
+    return FakeSummarizer()
+
+
 @pytest.fixture
 def locker(redis_client: aioredis.Redis) -> RedisLock:
     return RedisLock(redis_client, prefix="conv", ttl_seconds=10, renew_every_seconds=3)
