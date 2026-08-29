@@ -1,0 +1,37 @@
+# M1 最小开发栈：仅 postgres + redis。
+# api / worker / web 服务与既有 Traefik 的接入（外部网络 + labels）见技术方案 §16，M8 补全。
+name: mercury # 显式项目名：避免用目录名 deploy 与其他项目的容器/卷冲突
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: mercury
+      POSTGRES_PASSWORD: mercury
+      POSTGRES_DB: mercury
+    ports:
+      - "55432:5432" # 仅本地开发暴露（55432 避开本机其他 postgres）；生产不开放宿主端口（§16）
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mercury"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379" # 仅本地开发暴露
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:

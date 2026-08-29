@@ -11,7 +11,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [docs/Telegram-AI-Lead-System-MVP.md](docs/Telegram-AI-Lead-System-MVP.md) — 产品需求与边界的事实来源（其 §6 技术建议已被技术方案替代）：用企业知识库通过 RAG 回答客户问题，从对话中提取并评分销售线索，必要时转人工，并将线索同步到 CRM / Google Sheets。
 - [docs/technical-design.md](docs/technical-design.md) — **实现级技术方案（写代码以它为准）**：所有选型已定案（aiogram、arq、SQLAlchemy async、gspread、纯 Python 编排管线不用 LangGraph）、完整 DDL、编排管线、状态机、API 契约、环境变量清单，以及 M1–M8 实现里程碑顺序。
 
-写任何代码前先读技术方案对应章节；表名、状态值、接口以技术方案为准，不即兴改名。新的设计决策要落回技术方案文档。等脚手架落地后，更新本文件补充真实的构建 / 测试 / 运行命令。
+写任何代码前先读技术方案对应章节；表名、状态值、接口以技术方案为准，不即兴改名。新的设计决策要落回技术方案文档。
+
+## 当前进度
+
+M1 脚手架、M2 消息闭环骨架、M3 知识库（2026-08-29）、M4 受约束 RAG（2026-08-30）已完成。下一步：M5 线索（技术方案 §18）。
+
+M4 说明：LLM 依赖经 `Brain` 协议注入编排层（实现在 `llm/brain.py`，测试用 conftest 的 FakeBrain）；提示词全部在 `llm/prompts.py`（拒答用 NO_ANSWER_MARKER 哨兵）；端到端预算 `Deadline` 在 `domain/schemas.py`（triage 上限 2s 计入总预算，RAG 拿剩余）；chat 客户端双档策略——用户路径不重试不切 fallback，非用户路径重试1次+fallback。**真实模型验收**：配好 `.env`（LLM_API_KEY/LLM_CHAT_MODEL）后跑 `uv run python scripts/eval_rag.py --with-answers`，看"生成级报告"两个指标。
+
+M2 说明：业务管线在 `domain/orchestrator.py`（MessageSender/ConversationLocker 协议注入，arq 任务只是薄包装）；echo 回复是 M4 RAG 的占位；/human 仅通知（状态机在 M6）；无 `TELEGRAM_BOT_TOKEN` 时自动用 LoggingSender 替身，本地无需真实 bot 即可全链路测试。
+
+M3 说明：索引流程在 `llm/indexing.py`（版本化原子切换，无知识真空期）；检索在 `llm/rag.py`；无 `LLM_API_KEY` 时 embedder 为 None、索引任务明确失败（绝不用假向量污染知识库）；`DeterministicFakeEmbedder` 仅用于测试与 `--fake` 冒烟。评测：`uv run python scripts/eval_rag.py`（真实 key）或 `--fake`（离线管线冒烟）；评测集在 `scripts/eval/evalset.json`（当前 14 题，待扩到 30–50）。SQLAlchemy 坑：chunks 的 metadata 列映射属性名是 `meta`，insert values 必须用 `meta` 做键。
+
+## 常用命令
+
+```bash
+# 基础设施（postgres:55432 + redis:6379；项目名 mercury，避免与本机其他 compose 项目冲突）
+docker compose -f deploy/compose.yaml up -d
+
+# Python（单一根 pyproject；导入名 api/worker/domain/llm/integrations/observability）
+uv sync                                # 安装依赖
+uv run alembic upgrade head            # 应用迁移（DATABASE_URL 默认指向 localhost:55432）
+uv run uvicorn api.main:app --port 8000  # 启动 api；/health/live 与 /health/ready
+uv run arq worker.main.WorkerSettings    # 启动 worker（消息管线 + 兜底扫描器 cron）
+uv run python scripts/set_webhook.py     # 注册真实 bot webhook（需 .env 配好三件套）
+uv run ruff check . && uv run ruff format --check .
+uv run mypy .
+uv run pytest -q                       # 集成测试需 DATABASE_URL/REDIS_URL（本地 compose 或 CI services），缺省自动 skip
+
+# 单个测试
+uv run pytest tests/unit/test_health.py -q
+
+# Web（apps/web，Next.js 15 + AntD 5）
+cd apps/web && pnpm install && pnpm dev   # 本地开发（/api 代理到 localhost:8000）
+pnpm lint && pnpm typecheck && pnpm build
+```
+
+注意：本地 postgres 端口是 **55432**（5432 被本机其他项目占用）；生产/CI 用各自的 DATABASE_URL。migration 用 autogenerate 后必须人工校对（pgvector import、CREATE EXTENSION、表达式索引）。
 
 ## 规划中的架构（文档 §6）
 

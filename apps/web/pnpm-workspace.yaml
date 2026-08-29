@@ -1,0 +1,3 @@
+# pnpm 11 构建脚本审批：批准 unrs-resolver 的 postinstall（否则 install 被拦截）
+allowBuilds:
+  unrs-resolver: true

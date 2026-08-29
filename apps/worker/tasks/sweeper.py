@@ -1,0 +1,27 @@
+"""兜底扫描器（arq cron，每 60s；技术方案 §6）：先原子重置、再入队，只入队 RETURNING 的 ID。"""
+
+from typing import Any
+
+import structlog
+from domain import repositories
+
+logger = structlog.get_logger()
+
+
+async def sweep(ctx: dict[str, Any]) -> dict[str, int]:
+    session_factory = ctx["session_factory"]
+    async with session_factory() as session:
+        # ① processing 租约过期 → 原子重置为 queued（与管线第 0 步抢占条件闭环）
+        reset_ids = await repositories.reset_expired_processing(session, lease_minutes=5)
+        await session.commit()
+        # ② queued 超 60s 未被消费（覆盖"落库成功但入队失败"的窗口）
+        stale_ids = await repositories.stale_queued_ids(session, stale_seconds=60)
+
+    for update_id in set(reset_ids) | set(stale_ids):
+        await ctx["redis"].enqueue_job("process_update", update_id, None)
+
+    # TODO(M5): ③ replied 超 5min → enqueue extract_lead
+    # TODO(M7): ④ integration_jobs running 超 10min → 重置 pending 后入队
+    if reset_ids or stale_ids:
+        logger.info("sweeper_recovered", reset=reset_ids, stale=stale_ids)
+    return {"reset": len(reset_ids), "stale": len(stale_ids)}

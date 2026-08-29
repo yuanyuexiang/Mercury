@@ -1,0 +1,25 @@
+{
+  "documents": [
+    {
+      "title": "Nimbus AI API 产品资料",
+      "source_type": "markdown",
+      "path": "eval/sample-product.md"
+    }
+  ],
+  "questions": [
+    { "q": "你们支持私有化部署吗？", "answerable": true, "expect_keywords": ["私有化", "on-premise"] },
+    { "q": "私有化部署需要什么硬件资源？", "answerable": true, "expect_keywords": ["GPU", "A10"] },
+    { "q": "可以集成 HubSpot 吗？", "answerable": true, "expect_keywords": ["HubSpot"] },
+    { "q": "支持 Slack 接入吗？", "answerable": true, "expect_keywords": ["Slack"] },
+    { "q": "50 人团队的价格大概是多少？", "answerable": true, "expect_keywords": ["29 美元", "17,400"] },
+    { "q": "标准版怎么计费？", "answerable": true, "expect_keywords": ["百万 token", "8 美元"] },
+    { "q": "你们有 SOC 2 认证吗？", "answerable": true, "expect_keywords": ["SOC 2"] },
+    { "q": "数据加密是怎么做的？", "answerable": true, "expect_keywords": ["TLS", "AES-256"] },
+    { "q": "怎么预约产品 Demo？", "answerable": true, "expect_keywords": ["Demo", "sales@nimbus.example"] },
+    { "q": "私有化部署的交付周期多长？", "answerable": true, "expect_keywords": ["2–4 周", "交付周期"] },
+    { "q": "你们的退款政策是什么？", "answerable": false },
+    { "q": "公司 CEO 是谁？", "answerable": false },
+    { "q": "支持 Discord 机器人吗？", "answerable": false },
+    { "q": "你们在上海有办公室吗？", "answerable": false }
+  ]
+}

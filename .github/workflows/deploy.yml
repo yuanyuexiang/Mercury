@@ -1,0 +1,16 @@
+# 发布流水线（技术方案 §17）。占位版本，仅手动触发；M8 实现：
+# buildx → GHCR（sha-*/latest）→ SSH 部署 → 健康检查 → 失败自动回滚。
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 镜像 tag（回滚时填某个 sha-*）
+        default: latest
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploy 占位——M8 实现（技术方案 §17）"

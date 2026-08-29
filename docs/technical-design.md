@@ -26,7 +26,7 @@ MVP 文档留了若干开放选项，这里全部定下来，附理由：
 | 后台认证 | **单管理员，env 配置凭据（密码 bcrypt hash），JWT 放 httpOnly cookie，同域部署** | MVP 无多用户需求；Traefik 下 web 与 api 同域名（`/api` 前缀），cookie 最简单也最安全 |
 | 人工提醒渠道 | **Telegram 通知**（发给 `OPERATOR_TELEGRAM_CHAT_ID` 指定的运营者私聊/群） | P0 内零额外依赖 |
 | 模型配置方式 | **后台可配多供应商（DB 加密存储）+ env 兜底** | 交付客户后换模型/换 key 不需重新部署；api_key 用 Fernet 加密存库（主密钥在 env），兼容"不存明文密钥"红线；embedding 模型仅 env 配置（换维度需全量重索引，不进后台） |
-| Python 依赖管理 | **uv + pyproject.toml**（workspace 管理 apps/api、apps/worker、packages/*） | 上游文档已定 |
+| Python 依赖管理 | **uv + 单一根 pyproject**（hatchling 多包映射：apps/api、apps/worker、packages/* 以顶层包 `api`/`worker`/`domain`/`llm`/`integrations`/`observability` 导入，目录布局不变） | uv workspace 要求每包独立 pyproject + 嵌套同名目录，会破坏本文档所有路径引用；模块化单体无需按包发版，单根项目更简 |
 | 前端 | **Next.js 15 App Router + TypeScript + Ant Design 5** | 上游文档已定 |
 
 ---
@@ -79,6 +79,7 @@ Mercury/
 │   │       ├── leads.py
 │   │       ├── knowledge.py
 │   │       ├── metrics.py
+│   │       ├── settings.py     # 模型供应商配置 API（§10）
 │   │       └── health.py
 │   ├── worker/
 │   │   ├── main.py             # arq WorkerSettings
@@ -107,6 +108,8 @@ Mercury/
 │       └── middleware.ts       # 未登录重定向 /login
 ├── packages/
 │   ├── domain/                 # 业务核心，不依赖 FastAPI/arq
+│   │   ├── config.py           # 应用配置（§13 环境变量，pydantic-settings）
+│   │   ├── texts.py            # 机器人固定文案（非 LLM 提示词）
 │   │   ├── models.py           # SQLAlchemy ORM 模型（§4 的表）
 │   │   ├── schemas.py          # Pydantic：LeadExtraction、TriageResult 等
 │   │   ├── orchestrator.py     # §6 编排管线
@@ -118,28 +121,33 @@ Mercury/
 │   │   ├── client.py           # OpenAI 兼容客户端封装（base_url/model/费用记录）
 │   │   ├── prompts.py          # 全部系统提示词常量
 │   │   ├── rag.py              # 检索 + 受约束生成
+│   │   ├── brain.py            # Brain 协议实现：triage+answer 聚合，注入编排层
+│   │   ├── indexing.py         # 索引流程：解析→切分→embedding→版本化原子切换
 │   │   ├── extraction.py       # 字段提取调用
 │   │   ├── triage.py           # 意图/风险/是否需RAG 联合分类调用
 │   │   └── chunking.py         # 文档解析与切分
 │   ├── integrations/
-│   │   ├── telegram.py         # Bot API 封装（发消息、通知）
+│   │   ├── telegram.py         # Bot API 封装（发消息、通知；无 token 时 LoggingSender 替身）
+│   │   ├── locks.py            # Redis 会话锁（TTL+token+续期+Lua 释放，§6 第 1 步）
 │   │   ├── sheets.py           # Google Sheets LeadSyncPort 实现
 │   │   └── ports.py            # LeadSyncPort 协议定义
 │   └── observability/
 │       ├── logging.py          # structlog 配置、trace_id、脱敏 processor
 │       └── metrics.py          # 模型耗时/Token/成本记录
-├── migrations/                 # Alembic
+├── migrations/                 # Alembic（env.py 异步模板 + versions/）
+├── alembic.ini
 ├── tests/
 │   ├── unit/                   # scoring、merge、handoff、chunking
 │   ├── integration/            # webhook→回复 全链路（LLM 打桩）
 │   └── conftest.py             # testcontainers postgres、FakeLLM fixture
 ├── scripts/
-│   ├── eval_rag.py             # 30–50 问评测集跑分
+│   ├── eval_rag.py             # 评测集跑分：命中率/拒答率报告（--fake 离线冒烟）
+│   ├── eval/                   # 评测资产：sample-product.md（虚拟产品）+ evalset.json
 │   └── set_webhook.py          # 注册 Telegram webhook
 ├── deploy/
 │   └── compose.yaml            # 接入服务器既有 Traefik（外部网络 + labels，见 §16）
 ├── docs/
-├── pyproject.toml              # uv workspace 根
+├── pyproject.toml              # 单一根项目：依赖 + hatch 多包映射（§1）
 └── .env.example
 ```
 
@@ -447,8 +455,8 @@ class LeadExtraction(BaseModel):
     purchase_timeline: str | None
     integrations: list[str]
     notes: str | None
-    refused_fields: list[str]        # 本轮用户明确拒绝提供的字段
-    follow_up_question: str | None   # 建议追问（至多一个，可为 None）
+    refused_fields: list[str]  # 本轮用户明确拒绝提供的字段
+    follow_up_question: str | None  # 建议追问（至多一个，可为 None）
 ```
 
 合并规则（`lead_merge.py`，纯函数）：
@@ -688,7 +696,7 @@ main 开分支保护：CI 全绿才能合并。单人开发也走「短命分支
 
 | 里程碑 | 内容 | 验收标准 |
 |---|---|---|
-| **M1 脚手架** | uv workspace、目录骨架、settings、structlog、Alembic 首个 migration（§4 全部表）、compose（postgres/redis）、健康检查、ruff/mypy 配置、**ci.yml** | `docker compose up` 后 `/health/ready` 通过；migration 可升可降；首个 PR 上 CI 全绿 |
+| **M1 脚手架** | uv 项目、目录骨架、settings、structlog、Alembic 首个 migration（§4 全部表）、compose（postgres/redis）、健康检查、ruff/mypy 配置、**ci.yml** | `docker compose up` 后 `/health/ready` 通过；migration 可升可降；首个 PR 上 CI 全绿 |
 | **M2 消息闭环骨架** | webhook 幂等接收、arq 队列、user/conversation/message 落库、echo 回复、会话锁 | 真实 bot 收发消息；重复推送不产生重复记录 |
 | **M3 知识库** | 文档解析/切分/embedding/入库、检索函数、`index_document` 任务、eval 脚本 | 评测脚本能对样例文档跑出检索命中报告 |
 | **M4 受约束 RAG** | triage + RAG 生成 + 拒答路径接入管线，来源记录 | 演示剧本问题 1–2 正确回答且有来源；库外问题拒答 |

@@ -1,1 +1,24 @@
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+
+# Node / Next.js
+node_modules/
+.next/
+next-env.d.ts
+
+# 环境与密钥（.env.example 除外）
+.env
+.env.*
+!.env.example
+
+# 本地数据
+*.log
