@@ -34,7 +34,7 @@ class TelegramUpdate(Base):
 
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    # queued|processing|replied|done|failed|skipped（§6 管线与兜底扫描器）
+    # queued|processing|replied|extracting|done|failed|skipped（§6 管线与兜底扫描器）
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'queued'"))
     picked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
@@ -123,9 +123,9 @@ class Message(Base):
         BigInteger, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
     )
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
-    # 产生该消息的 update（人工/系统消息为 NULL）
+    # 产生该消息的 update（人工/系统消息为 NULL；update 被保留期清理后置 NULL）
     source_update_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey("telegram_updates.update_id")
+        BigInteger, ForeignKey("telegram_updates.update_id", ondelete="SET NULL")
     )
     # outbound 投递幂等键：
     # reply:{update_id} | followup:{update_id} | ack:{update_id} | fallback:{update_id}

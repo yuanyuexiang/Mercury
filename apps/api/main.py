@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 import redis.asyncio as aioredis
 from arq import create_pool
 from arq.connections import RedisSettings
-from domain.config import get_settings
+from domain.config import get_settings, validate_production_settings
 from fastapi import FastAPI
 from integrations.telegram import build_sender
 from llm.client import OpenAIChatClient
@@ -20,6 +20,7 @@ from api.routers import (
     knowledge,
     leads,
     metrics,
+    users,
     webhook,
 )
 from api.routers import (
@@ -30,6 +31,7 @@ from api.routers import (
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
+    validate_production_settings(settings)
     configure_logging(settings.log_level)
     app.state.settings = settings
     app.state.engine = create_async_engine(settings.database_url, pool_pre_ping=True)
@@ -59,6 +61,7 @@ def create_app() -> FastAPI:
     app.include_router(knowledge.router)
     app.include_router(metrics.router)
     app.include_router(settings_router.router)
+    app.include_router(users.router)
     return app
 
 

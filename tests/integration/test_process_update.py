@@ -139,3 +139,17 @@ async def test_failure_marks_failed_and_sends_fallback(session_factory, locker, 
             )
         ).scalar()
         assert n_outbound == 2  # 失败的正文（failed）+ 兜底（sent）
+
+
+async def test_ordering_guard_defers_newer_update(session_factory, locker, sender, brain) -> None:
+    """第三轮评审：同 chat 有更早未完成 update → 新消息让位，保证会话内按序处理。"""
+    await _seed(session_factory, tg_update(150, "第一条"))
+    await _seed(session_factory, tg_update(151, "第二条"))
+
+    # 先处理新的 → 应让位（第一条还是 queued）
+    assert await run_process_update(session_factory, locker, sender, brain, 151) == "locked"
+    assert sender.sent == []
+
+    assert await run_process_update(session_factory, locker, sender, brain, 150) == "done"
+    assert await run_process_update(session_factory, locker, sender, brain, 151) == "done"
+    assert [t for _, t in sender.sent] == ["回答：第一条", "回答：第二条"]

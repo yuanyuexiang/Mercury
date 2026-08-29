@@ -83,3 +83,26 @@ def test_team_size_fits() -> None:
     assert not team_size_fits("3")
     assert not team_size_fits("小团队")
     assert not team_size_fits(None)
+
+
+def test_validate_production_settings() -> None:
+    """第三轮评审：生产（https）弱配置必须拒绝启动；开发环境不拦。"""
+    import pytest
+    from domain.config import Settings, validate_production_settings
+
+    # 开发环境（无 https）不校验
+    validate_production_settings(Settings(public_base_url=""))
+
+    weak = Settings(public_base_url="https://demo.example.com", jwt_secret="short")
+    with pytest.raises(RuntimeError, match="JWT_SECRET"):
+        validate_production_settings(weak)
+
+    strong = Settings(
+        public_base_url="https://demo.example.com",
+        jwt_secret="x" * 40,
+        admin_username="admin",
+        admin_password_hash="$2b$12$abcdefghijklmnopqrstuv",
+        settings_encryption_key="k" * 44,
+        telegram_webhook_secret="s" * 40,
+    )
+    validate_production_settings(strong)  # 不抛

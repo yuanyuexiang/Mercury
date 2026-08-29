@@ -69,3 +69,34 @@ async def test_duplicate_push_no_duplicate_rows(session_factory) -> None:
         count = (await session.execute(select(func.count()).select_from(TelegramUpdate))).scalar()
     assert count == 1
     assert len(arq.jobs) == 1
+
+
+async def test_db_failure_returns_503_so_telegram_retries(session_factory) -> None:
+    """第三轮评审：数据库未落库必须 5xx——返回 200 会让 Telegram 放弃重推、消息永久丢失。"""
+
+    class BrokenFactory:
+        def __call__(self):
+            raise ConnectionError("db down")
+
+    app, arq = make_app(BrokenFactory())
+    resp = await _post(app, SECRET, SECRET, tg_update(9, "hello"))
+    assert resp.status_code == 503
+    assert arq.jobs == []
+
+
+async def test_enqueue_failure_still_200(session_factory) -> None:
+    """已落库、入队失败 → 200（扫描器兜底），不能让 Telegram 重推造成重复。"""
+
+    class BrokenArq:
+        async def enqueue_job(self, *args, **kwargs):
+            raise ConnectionError("redis down")
+
+    app, _ = make_app(session_factory)
+    app.state.arq = BrokenArq()
+    resp = await _post(app, SECRET, SECRET, tg_update(10, "hello"))
+    assert resp.status_code == 200
+    async with session_factory() as session:
+        from sqlalchemy import select
+
+        row = (await session.execute(select(TelegramUpdate))).scalar_one()
+        assert row.status == "queued"  # 进了表，扫描器②会补入队

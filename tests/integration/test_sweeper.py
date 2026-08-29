@@ -65,3 +65,34 @@ async def test_stale_queued_detected(session_factory) -> None:
         await session.commit()
     async with session_factory() as session:
         assert await repositories.stale_queued_ids(session, stale_seconds=60) == [203]
+
+
+async def test_retention_cleanup_not_blocked_by_fk(session_factory, locker, sender, brain) -> None:
+    """第三轮评审：清理超期 update 不被 messages.source_update_id 外键阻断（SET NULL）。"""
+    from domain.models import Message
+    from domain.orchestrator import run_process_update
+
+    async with session_factory() as session:
+        await repositories.insert_update(session, 210, tg_update(210, "老消息"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 210)
+
+    async with session_factory() as session:
+        await session.execute(
+            update(TelegramUpdate)
+            .where(TelegramUpdate.update_id == 210)
+            .values(received_at=datetime.now(UTC) - timedelta(days=400))
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        removed = await repositories.cleanup_expired_data(session, retention_days=180)
+        await session.commit()
+    assert removed["updates"] == 1
+
+    async with session_factory() as session:
+        assert (await session.execute(select(TelegramUpdate))).scalar_one_or_none() is None
+        inbound = (
+            await session.execute(select(Message).where(Message.direction == "inbound"))
+        ).scalar_one()
+        assert inbound.source_update_id is None  # 外键置空，消息保留

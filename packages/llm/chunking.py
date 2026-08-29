@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import httpx
 import structlog
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
@@ -48,11 +47,11 @@ def load_source_text(
         if not source_url:
             raise ValueError("url 需要 source_url")
         import trafilatura
+        from integrations.netguard import fetch_public_url
 
-        # TODO(M8): SSRF 防护（§14）——M3 仅运营者脚本调用，不暴露给外部输入
-        resp = httpx.get(source_url, timeout=20, follow_redirects=True)
-        resp.raise_for_status()
-        extracted = trafilatura.extract(resp.text)
+        # SSRF 防护（§14）：逐跳重定向校验 + 流量上限，api 校验过的 URL 抓取时再验
+        html = fetch_public_url(source_url)
+        extracted = trafilatura.extract(html)
         if not extracted:
             raise ValueError(f"无法从 {source_url} 提取正文")
         return extracted

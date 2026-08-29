@@ -12,7 +12,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from domain import handoff, lead_merge, repositories, scoring, texts
-from domain.models import Conversation, Lead, Message, TelegramUpdate, User
+from domain.models import Conversation, Lead, Message, User
 from domain.schemas import (
     Deadline,
     LeadExtraction,
@@ -322,6 +322,14 @@ async def run_process_update(
             await session.commit()
         return "done"
 
+    async with session_factory() as session:
+        # 顺序守卫（第三轮评审）：同 chat 有更早未完成 update（如扫描器恢复的旧消息）
+        # → 让位重试，避免旧消息在 /reset 之后乱序进入新会话
+        if await repositories.has_earlier_pending_update(session, chat_id, update_id):
+            await repositories.requeue_update(session, update_id)
+            await session.commit()
+            return "locked"
+
     async with locker.hold(chat_id) as acquired:
         if not acquired:
             async with session_factory() as session:
@@ -468,10 +476,11 @@ async def run_extract_lead(
     返回 (outcome, 新建同步任务的 job_id)；job_id 非 None 时由 wrapper 入队 sync_lead。
     """
     async with session_factory() as session:
-        row = await session.get(TelegramUpdate, update_id)
-        if row is None or row.status != "replied":
-            return "skipped", None
-        payload = row.payload
+        # 原子抢占（第三轮评审）：replied → extracting，并发重复入队只有一个能通过
+        payload = await repositories.claim_replied_update(session, update_id)
+        await session.commit()
+    if payload is None:
+        return "skipped", None
 
     message = payload.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
@@ -484,7 +493,10 @@ async def run_extract_lead(
 
     async with locker.hold(chat_id) as acquired:
         if not acquired:
-            return "locked", None  # 状态保持 replied，由重入队/扫描器再试
+            async with session_factory() as session:
+                await repositories.mark_update(session, update_id, "replied")  # 让位，回到可抢占态
+                await session.commit()
+            return "locked", None
 
         async with session_factory() as session:
             try:

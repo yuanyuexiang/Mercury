@@ -47,7 +47,10 @@ def require_admin(request: Request) -> str:
         payload: dict[str, Any] = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=401, detail="会话无效或已过期") from exc
-    return str(payload.get("sub", ""))
+    subject = str(payload.get("sub", ""))
+    if not settings.admin_username or subject != settings.admin_username:
+        raise HTTPException(status_code=401, detail="会话无效")  # 防换号/空配置签发
+    return subject
 
 
 def require_csrf(request: Request) -> None:

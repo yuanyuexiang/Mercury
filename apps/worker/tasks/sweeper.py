@@ -20,10 +20,13 @@ async def sweep(ctx: dict[str, Any]) -> dict[str, int]:
     for update_id in set(reset_ids) | set(stale_ids):
         await ctx["redis"].enqueue_job("process_update", update_id, None)
 
-    # ③ replied 超 5min（extract_lead 任务丢失）→ 补 enqueue（§6）
+    # ③ replied 超 5min（extract_lead 任务丢失）→ 补 enqueue；
+    #    extracting 租约过期（worker 崩溃）→ 原子重置回 replied 再入队（§6）
     async with session_factory() as session:
+        extracting_ids = await repositories.reset_expired_extracting(session, lease_minutes=5)
+        await session.commit()
         replied_ids = await repositories.stale_replied_ids(session, stale_seconds=300)
-    for update_id in replied_ids:
+    for update_id in set(replied_ids) | set(extracting_ids):
         await ctx["redis"].enqueue_job("extract_lead", update_id, None)
 
     # ④ integration_jobs：running 超 10min 先原子重置为 pending 再入队；

@@ -8,7 +8,7 @@ from typing import Any
 import redis.asyncio as aioredis
 from arq import cron
 from arq.connections import RedisSettings
-from domain.config import get_settings
+from domain.config import get_settings, validate_production_settings
 from integrations.locks import RedisLock
 from integrations.sheets import build_lead_sync
 from integrations.telegram import build_sender
@@ -28,6 +28,7 @@ from worker.tasks.sync_lead import sync_lead
 
 async def on_startup(ctx: dict[str, Any]) -> None:
     settings = get_settings()
+    validate_production_settings(settings)
     configure_logging(settings.log_level)
     ctx["settings"] = settings
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)

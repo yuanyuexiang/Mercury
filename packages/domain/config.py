@@ -48,3 +48,20 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def validate_production_settings(settings: Settings) -> None:
+    """生产安全底线（§14，第三轮评审）：PUBLIC_BASE_URL 为 https 即视为生产，启动即拒绝弱配置。"""
+    if not settings.public_base_url.startswith("https"):
+        return
+    problems: list[str] = []
+    if len(settings.jwt_secret) < 32:
+        problems.append("JWT_SECRET 至少 32 字符")
+    if not settings.admin_username or not settings.admin_password_hash:
+        problems.append("管理员用户名与 bcrypt hash 必须配置")
+    if not settings.settings_encryption_key:
+        problems.append("SETTINGS_ENCRYPTION_KEY 未配置")
+    if len(settings.telegram_webhook_secret) < 32:
+        problems.append("TELEGRAM_WEBHOOK_SECRET 至少 32 字符")
+    if problems:
+        raise RuntimeError("生产配置不安全，拒绝启动：" + "；".join(problems))

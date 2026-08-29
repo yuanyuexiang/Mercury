@@ -17,6 +17,8 @@ services:
     env_file: .env
     restart: unless-stopped
     networks: [internal, proxy]
+    volumes:
+      - storage:/app/var/storage # 与 worker 共享：api 写入的上传文件 worker 索引时要读
     depends_on:
       migrate:
         condition: service_completed_successfully

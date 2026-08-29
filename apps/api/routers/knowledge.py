@@ -145,6 +145,9 @@ async def delete_document(request: Request, document_id: int) -> dict[str, bool]
         await session.execute(
             delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id)
         )
+        storage_path = doc.storage_path
         await session.delete(doc)
         await session.commit()
+    if storage_path:
+        Path(storage_path).unlink(missing_ok=True)  # noqa: ASYNC240  # 原始文件一并清理（§14）
     return {"ok": True}

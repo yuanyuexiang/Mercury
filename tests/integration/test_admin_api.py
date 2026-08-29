@@ -8,7 +8,7 @@ import pytest
 from api.main import create_app
 from domain import repositories
 from domain.config import Settings
-from domain.models import LlmProvider
+from domain.models import IntegrationJob, Lead, LlmProvider
 from domain.orchestrator import run_extract_lead, run_process_update
 from domain.schemas import LeadExtraction, TriageResult
 from llm.provider_config import ProviderSource, decrypt_api_key
@@ -275,3 +275,61 @@ async def test_metrics_endpoints(client, session_factory, locker, brain, sender)
     gaps = (await client.get("/api/metrics/knowledge-gaps")).json()
     assert gaps["items"][0]["question"] == "冷门问题"
     assert (await client.get("/api/metrics/costs")).status_code == 200
+
+
+async def test_user_data_deletion(
+    client, session_factory, locker, brain, sender, extractor
+) -> None:
+    """第三轮评审：DELETE /api/users/by-telegram/{id}——级联删除 + jobs/audit 清理 + 匿名审计。"""
+    await _login(client)
+    brain.triage_result = TriageResult(purchase_intent=True)
+    extractor.result = LeadExtraction(company="ToDelete Inc")
+    async with session_factory() as session:
+        await repositories.insert_update(session, 705, tg_update(705, "想采购"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 705)
+    await run_extract_lead(session_factory, locker, sender, extractor, 705)
+
+    resp = await client.delete("/api/users/by-telegram/500", headers=WRITE_HEADERS)
+    assert resp.status_code == 200
+    counts = resp.json()
+    assert counts["leads"] == 1 and counts["conversations"] == 1
+    assert counts["integration_jobs"] == 1
+
+    from domain.models import AuditLog, Conversation, Message, User
+
+    async with session_factory() as session:
+        assert (await session.execute(select(User))).scalar_one_or_none() is None
+        assert (await session.execute(select(Conversation))).scalar_one_or_none() is None
+        assert (await session.execute(select(Message))).scalars().first() is None
+        assert (await session.execute(select(Lead))).scalar_one_or_none() is None
+        assert (await session.execute(select(IntegrationJob))).scalar_one_or_none() is None
+        # lead 字段审计（含新旧值）已清；只剩登录/删除动作类审计
+        remaining = (await session.execute(select(AuditLog))).scalars().all()
+        assert all(a.entity_type != "lead" for a in remaining)
+        assert any(a.action == "user_data_deleted" for a in remaining)
+
+    assert (
+        await client.delete("/api/users/by-telegram/999999", headers=WRITE_HEADERS)
+    ).status_code == 404
+
+
+async def test_knowledge_delete_removes_file(client, session_factory, tmp_path) -> None:
+    """第三轮评审：删除文档同时删除 storage 原始文件。"""
+    from pathlib import Path
+
+    await _login(client)
+    client.app.state.settings.storage_dir = str(tmp_path)
+    resp = await client.post(
+        "/api/knowledge/documents",
+        files={"file": ("f.md", b"# doc\n\nbody", "text/markdown")},
+        headers=WRITE_HEADERS,
+    )
+    doc_id = resp.json()["id"]
+    async with session_factory() as session:
+        doc = await repositories.get_document(session, doc_id)
+        assert doc is not None and doc.storage_path
+        stored = Path(doc.storage_path)
+    assert stored.exists()  # noqa: ASYNC240
+    await client.delete(f"/api/knowledge/documents/{doc_id}", headers=WRITE_HEADERS)
+    assert not stored.exists()  # noqa: ASYNC240

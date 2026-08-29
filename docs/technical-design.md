@@ -1,6 +1,6 @@
 # 技术实现方案
 
-Telegram AI 客服与询盘转化系统 — 实现级设计 v1.2（2026-08-29，两轮外部评审可靠性修订）
+Telegram AI 客服与询盘转化系统 — 实现级设计 v1.3（2026-08-30，三轮外部评审修订：可靠性 + 生产安全）
 
 - 上游文档：[Telegram-AI-Lead-System-MVP.md](./Telegram-AI-Lead-System-MVP.md)（需求与边界以它为准；其 §6 技术建议已被本文档替代）
 - 本文档用途：指导代码生成。所有"二选一"已在此定案，代码生成阶段不再做架构决策。
@@ -81,6 +81,7 @@ Mercury/
 │   │       ├── knowledge.py
 │   │       ├── metrics.py
 │   │       ├── settings.py     # 模型供应商配置 API（§10）
+│   │       ├── users.py        # 用户数据删除（§14）
 │   │       └── health.py
 │   ├── worker/
 │   │   ├── main.py             # arq WorkerSettings
@@ -131,6 +132,7 @@ Mercury/
 │   ├── integrations/
 │   │   ├── telegram.py         # Bot API 封装（发消息、通知；无 token 时 LoggingSender 替身）
 │   │   ├── locks.py            # Redis 会话锁（TTL+token+续期+Lua 释放，§6 第 1 步）
+│   │   ├── netguard.py         # SSRF：URL 校验 + 安全抓取（逐跳重定向校验，§14）
 │   │   ├── sheets.py           # Google Sheets LeadSyncPort 实现
 │   │   └── ports.py            # LeadSyncPort 协议定义
 │   └── observability/
@@ -171,7 +173,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE telegram_updates (          -- 幂等表
   update_id     BIGINT PRIMARY KEY,
   payload       JSONB NOT NULL,
-  status        TEXT NOT NULL DEFAULT 'queued',  -- queued|processing|replied|done|failed|skipped
+  status        TEXT NOT NULL DEFAULT 'queued',  -- queued|processing|replied|extracting|done|failed|skipped
   picked_at     TIMESTAMPTZ,                     -- worker 抢占时间（处理租约起点）
   error         TEXT,
   received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -209,7 +211,7 @@ CREATE TABLE messages (
   id                  BIGSERIAL PRIMARY KEY,
   conversation_id     BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   telegram_message_id BIGINT,
-  source_update_id    BIGINT REFERENCES telegram_updates(update_id),
+  source_update_id    BIGINT REFERENCES telegram_updates(update_id) ON DELETE SET NULL,
     -- 产生该消息的 update（人工/系统消息为 NULL）
   delivery_key        TEXT,
     -- outbound 投递幂等键：reply:{update_id}|followup:{update_id}|ack:{update_id}|fallback:{update_id}
@@ -361,8 +363,8 @@ CREATE TABLE audit_logs (
 1. 双重校验：URL 路径 `bot_secret` 与请求头 `X-Telegram-Bot-Api-Secret-Token`（setWebhook 时设置的 secret_token）均用 `secrets.compare_digest` 比较，任一不符返回 404。
 2. 解析 body 取 `update_id`；`INSERT INTO telegram_updates ... ON CONFLICT DO NOTHING`，冲突（重复推送）直接返回 `{"ok": true}`。
 3. `arq.enqueue_job("process_update", update_id)`，返回 200。总耗时目标 < 50ms。
-4. 任何内部异常也返回 200（记录错误日志）——绝不让 Telegram 因 5xx 无限重推。
-5. "落库成功但入队失败"的窗口由 worker 兜底扫描器闭环（见 §6）：update 只要进了表就一定会被处理，**不依赖单次 enqueue 成功**。
+4. 失败语义（三轮评审修订）：**数据库未提交 → 返回 503**，让 Telegram 重推（消息不在我们手里，绝不能吞）；畸形 payload → 200 直接吞（重推无益）。
+5. **已落库、入队失败 → 返回 200**，由 worker 兜底扫描器闭环（见 §6）：update 只要进了表就一定会被处理，不依赖单次 enqueue 成功。
 
 非文本消息（图片/语音等）：标记 `status='skipped'`，回复固定文案"目前仅支持文字消息"。
 
@@ -377,6 +379,8 @@ process_update(update_id):
   0. 原子抢占：UPDATE telegram_updates SET status='processing', picked_at=now()
      WHERE update_id=$1 AND status IN ('queued','failed')
      —— 0 行命中说明已被处理或正在处理，直接结束（重复入队无害）
+  0b. 顺序守卫：同 chat 存在更早的未完成 update（queued/processing，如扫描器恢复的
+     旧消息）→ 回置 queued 让位重试，保证会话内按 update_id 序处理（三轮评审）
   1. 取 Redis 会话锁 conv:{chat_id}：TTL 60s、带随机 token、Lua 比对后释放、
      任务内每 20s 续期；拿不到 → 状态回置 'queued'，defer 2s 重新入队
   2. 加载/创建 user、conversation；保存 inbound message
@@ -411,6 +415,7 @@ process_update(update_id):
      第 5 步之后不再有任何用户可见动作
 
 extract_lead(update_id)  —— 独立任务，回复已送达后执行，失败绝不打扰用户：
+  0. 原子抢占：replied → extracting（并发重复入队只有一个通过；拿不到会话锁回置 replied）
   1. 取同一会话锁；字段提取（§7，超时 30s、重试 1 次、可切 fallback）
      → 合并 → 评分（§8）
   2. 缺失关键字段且不在 declined_fields → follow_up_question 以
@@ -427,7 +432,7 @@ LLM 调用失败策略：**用户回复路径（triage/RAG）不做长重试**�
 
 1. `processing` 租约过期：`UPDATE telegram_updates SET status='queued', picked_at=NULL WHERE status='processing' AND picked_at < now() - interval '5 min' RETURNING update_id` → enqueue `process_update`；
 2. `queued` 超 60s 未被消费（覆盖"DB 已提交但入队失败"的窗口）→ 直接补 enqueue；
-3. `replied` 超 5min（extract_lead 任务丢失）→ 补 enqueue `extract_lead`；
+3. `replied` 超 5min（extract_lead 任务丢失）→ 补 enqueue `extract_lead`；`extracting` 租约过期 → 原子重置回 `replied` 再入队；
 4. `integration_jobs` 中 `running` 超 10min → 重置为 `pending`、清 `picked_at` 后入队。
 
 这是"消息处理可追踪率 100%"的最终保障。
@@ -628,8 +633,9 @@ PUBLIC_HOST=                    # 对外域名（PUBLIC_BASE_URL 的 host 部分
 - 提示词注入防线在代码层落实：用户消息与知识库 chunk 一律放在 user role 内容里，系统规则只在 system prompt；不给模型任何工具/函数可调用（结构化输出不算工具），所有写操作由管线代码完成。
 - 后台 Cookie：`HttpOnly` + `Secure` + `SameSite=Lax`；写接口要求自定义头（`X-Requested-With: fetch`）作 CSRF 防线——跨站表单无法携带自定义头。
 - 登录限流：每 IP 5 次/分钟（Redis 计数），失败与锁定写 audit_logs。
-- URL 导入 SSRF 防护：仅允许 http/https；DNS 解析后拒绝私网/链路本地/云元数据地址，重定向逐跳复检；响应上限 10MB、超时 20s。上传限制：≤20MB、PDF ≤200 页、解析超时 60s。
+- URL 导入 SSRF 防护（`integrations/netguard.py`，api 与 worker 共用）：仅 http/https；DNS 解析后拒绝私网/链路本地/云元数据地址；worker 实际抓取关闭自动重定向、**逐跳重新校验**、响应上限 10MB、超时 20s（解析后 IP 固定为 P1）。上传限制：≤20MB、PDF ≤200 页。
 - 后台配置的 LLM base_url 默认同样拒绝内网地址（`ALLOW_PRIVATE_LLM_BASE_URL=true` 显式放开，用于自建推理服务场景）。
+- 生产安全底线（三轮评审）：`PUBLIC_BASE_URL` 为 https 时启动强制校验——JWT_SECRET ≥32 字符、管理员凭据/加密主密钥/webhook secret 齐备，否则拒绝启动；JWT 校验含 `sub == admin_username`。
 - 用户数据删除：`DELETE /api/users/by-telegram/{telegram_user_id}`——内容表靠 DDL 级联（users→conversations→messages/handoffs、users→leads）；integration_jobs（无外键）与 audit_logs 中该用户相关 entity 的记录（其 metadata 含 lead 字段新旧值）由删除流程显式清理；删除动作本身另记一条匿名 audit。数据保留期由每日 arq cron 按 `DATA_RETENTION_DAYS` 清理。
 
 ---

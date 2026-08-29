@@ -650,3 +650,100 @@ async def cleanup_expired_data(session: AsyncSession, retention_days: int) -> di
         "updates": cast(CursorResult[Any], updates_result).rowcount,
         "conversations": cast(CursorResult[Any], convs_result).rowcount,
     }
+
+
+async def delete_user_data(session: AsyncSession, telegram_user_id: int) -> dict[str, int] | None:
+    """按 Telegram user ID 删除用户数据（§14）。
+
+    内容表靠 DDL 级联（users→conversations→messages/handoffs、users→leads）；
+    integration_jobs（无外键）与 audit_logs 中相关 entity 的记录（metadata 含
+    lead 字段新旧值）显式清理；删除动作本身由调用方另记匿名 audit。
+    返回 None 表示用户不存在。
+    """
+    from sqlalchemy import delete
+
+    user = (
+        await session.execute(select(User).where(User.telegram_user_id == telegram_user_id))
+    ).scalar_one_or_none()
+    if user is None:
+        return None
+
+    lead_ids = [
+        row[0]
+        for row in (await session.execute(select(Lead.id).where(Lead.user_id == user.id))).all()
+    ]
+    conv_ids = [
+        row[0]
+        for row in (
+            await session.execute(select(Conversation.id).where(Conversation.user_id == user.id))
+        ).all()
+    ]
+
+    jobs_removed = 0
+    audits_removed = 0
+    if lead_ids:
+        result = await session.execute(
+            delete(IntegrationJob).where(
+                IntegrationJob.entity_type == "lead", IntegrationJob.entity_id.in_(lead_ids)
+            )
+        )
+        jobs_removed = cast(CursorResult[Any], result).rowcount
+        result = await session.execute(
+            delete(AuditLog).where(AuditLog.entity_type == "lead", AuditLog.entity_id.in_(lead_ids))
+        )
+        audits_removed += cast(CursorResult[Any], result).rowcount
+    if conv_ids:
+        result = await session.execute(
+            delete(AuditLog).where(
+                AuditLog.entity_type == "conversation", AuditLog.entity_id.in_(conv_ids)
+            )
+        )
+        audits_removed += cast(CursorResult[Any], result).rowcount
+
+    await session.delete(user)  # 级联 conversations/messages/handoffs/leads
+    return {
+        "leads": len(lead_ids),
+        "conversations": len(conv_ids),
+        "integration_jobs": jobs_removed,
+        "audit_logs": audits_removed,
+    }
+
+
+async def claim_replied_update(session: AsyncSession, update_id: int) -> dict[str, Any] | None:
+    """extract_lead 原子抢占（第三轮评审）：replied → extracting，并发任务只有一个能通过。"""
+    stmt = (
+        update(TelegramUpdate)
+        .where(TelegramUpdate.update_id == update_id, TelegramUpdate.status == "replied")
+        .values(status="extracting", picked_at=func.now())
+        .returning(TelegramUpdate.payload)
+    )
+    row = (await session.execute(stmt)).first()
+    return row[0] if row else None
+
+
+async def reset_expired_extracting(session: AsyncSession, lease_minutes: int = 5) -> list[int]:
+    """兜底扫描器③'：extracting 租约过期（worker 崩溃）→ 原子重置回 replied，返回待入队 ID。"""
+    deadline = datetime.now(UTC) - timedelta(minutes=lease_minutes)
+    stmt = (
+        update(TelegramUpdate)
+        .where(TelegramUpdate.status == "extracting", TelegramUpdate.picked_at < deadline)
+        .values(status="replied", picked_at=func.now())
+        .returning(TelegramUpdate.update_id)
+    )
+    return [row[0] for row in (await session.execute(stmt)).fetchall()]
+
+
+async def has_earlier_pending_update(
+    session: AsyncSession, chat_id: int, before_update_id: int
+) -> bool:
+    """同 chat 是否存在更早的未完成 update（第三轮评审：会话内按序处理的守卫）。"""
+    stmt = (
+        select(func.count())
+        .select_from(TelegramUpdate)
+        .where(
+            TelegramUpdate.update_id < before_update_id,
+            TelegramUpdate.status.in_(["queued", "processing"]),
+            TelegramUpdate.payload["message"]["chat"]["id"].as_integer() == chat_id,
+        )
+    )
+    return bool((await session.execute(stmt)).scalar())

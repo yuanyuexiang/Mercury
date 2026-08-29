@@ -142,3 +142,37 @@ async def test_no_change_no_new_job(session_factory, locker, sender, brain, extr
         assert lead.version == 2, "无变更不应再 bump"
         jobs = (await session.execute(select(IntegrationJob))).scalars().all()
         assert len(jobs) == 1
+
+
+async def test_atomic_claim_prevents_duplicate_extraction(
+    session_factory, locker, sender, brain, extractor
+) -> None:
+    """第三轮评审：replied → extracting 原子抢占，并发重复入队只有一个能通过。"""
+    await _seed_replied(session_factory, locker, sender, brain, 408, "并发测试")
+    async with session_factory() as session:
+        first = await repositories.claim_replied_update(session, 408)
+        await session.commit()
+    assert first is not None
+    async with session_factory() as session:
+        second = await repositories.claim_replied_update(session, 408)
+        await session.commit()
+    assert second is None, "第二个并发任务必须抢占失败"
+
+    # extracting 卡死 → 扫描器③'重置回 replied 后可再处理
+    from datetime import UTC, datetime, timedelta
+
+    from domain.models import TelegramUpdate
+    from sqlalchemy import update as sa_update
+
+    async with session_factory() as session:
+        await session.execute(
+            sa_update(TelegramUpdate)
+            .where(TelegramUpdate.update_id == 408)
+            .values(picked_at=datetime.now(UTC) - timedelta(minutes=30))
+        )
+        await session.commit()
+        reset_ids = await repositories.reset_expired_extracting(session, lease_minutes=5)
+        await session.commit()
+    assert reset_ids == [408]
+    outcome, _ = await run_extract_lead(session_factory, locker, sender, extractor, 408)
+    assert outcome == "done"
