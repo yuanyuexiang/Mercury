@@ -15,6 +15,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import Logo from "@/components/Logo";
 import { api } from "@/lib/api";
 import { brandTitle, fetchBrandName } from "@/lib/brand";
 
@@ -83,24 +84,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           zIndex: 10,
         }}
       >
-        <Tooltip title={`${title} · 询盘转化系统${brand ? "，Powered by Mercury" : ""}`} placement="right">
-          <div
-            style={{
-              width: 38,
-              height: 38,
-              borderRadius: 11,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "linear-gradient(135deg,#2F54EB,#13C2C2)",
-              color: "#fff",
-              fontWeight: 700,
-              fontSize: 18,
-              cursor: "default",
-              userSelect: "none",
-            }}
-          >
-            {title.charAt(0).toUpperCase()}
+        <Tooltip
+          title={`${title} · 询盘转化系统${brand ? "，Powered by Mercury" : ""}`}
+          placement="right"
+        >
+          <div style={{ cursor: "default" }}>
+            <Logo size={38} />
           </div>
         </Tooltip>
 

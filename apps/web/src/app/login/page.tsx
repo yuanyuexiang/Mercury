@@ -5,6 +5,7 @@ import { Alert, Button, Form, Input, Typography } from "antd";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import Logo from "@/components/Logo";
 import { api, ApiError } from "@/lib/api";
 import { brandTitle, fetchBrandName } from "@/lib/brand";
 
@@ -50,21 +51,14 @@ export default function LoginPage() {
         <div style={{ textAlign: "center", marginBottom: 28 }}>
           <div
             style={{
-              width: 56,
-              height: 56,
-              borderRadius: 16,
+              display: "inline-block",
               margin: "0 auto 14px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "linear-gradient(135deg,#2F54EB,#13C2C2)",
-              color: "#fff",
-              fontSize: 26,
-              fontWeight: 700,
+              borderRadius: 16,
               boxShadow: "0 8px 24px rgba(47,84,235,0.35)",
+              lineHeight: 0,
             }}
           >
-            {brandTitle(brand).charAt(0).toUpperCase()}
+            <Logo size={64} />
           </div>
           <Typography.Title level={3} style={{ color: "#fff", margin: 0 }}>
             {brandTitle(brand)}
