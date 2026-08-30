@@ -14,6 +14,7 @@ import {
   Button,
   Card,
   Checkbox,
+  Collapse,
   Form,
   Input,
   Modal,
@@ -116,6 +117,7 @@ export default function SettingsPage() {
   const [preset, setPreset] = useState<ProviderPreset | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [form] = Form.useForm();
 
   const fetchModels = async () => {
@@ -153,6 +155,7 @@ export default function SettingsPage() {
     setEditing(provider);
     setPreset(null);
     setModels([]);
+    setAdvancedOpen(false);
     form.resetFields();
     if (provider) form.setFieldsValue({ ...provider, api_key: "" });
     setModalOpen(true);
@@ -327,11 +330,17 @@ export default function SettingsPage() {
         onOk={() => form.submit()}
         okText="保存"
       >
-        <Form form={form} layout="vertical" onFinish={submit}>
+        <Form
+          form={form}
+          layout="vertical"
+          onFinish={submit}
+          // 必填项（如 Base URL）藏在高级选项里：校验失败时自动展开，避免报错看不见
+          onFinishFailed={() => setAdvancedOpen(true)}
+        >
           {!editing && (
-            <Form.Item label="选择供应商（自动填好地址与推荐模型，只需再贴 API Key）">
+            <Form.Item label="选择 AI 服务商">
               <Select
-                placeholder="常见供应商模板；也可跳过全部手填"
+                placeholder="选一家，剩下的自动填好——只需再贴 API Key"
                 options={PROVIDER_PRESETS.map((p, i) => ({ value: i, label: p.label }))}
                 onChange={(i: number) => {
                   const p = PROVIDER_PRESETS[i];
@@ -356,16 +365,6 @@ export default function SettingsPage() {
               )}
             </Form.Item>
           )}
-          <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
-            <Input placeholder="如 DeepSeek 官方" />
-          </Form.Item>
-          <Form.Item
-            name="base_url"
-            label="Base URL（OpenAI 兼容）"
-            rules={[{ required: true, message: "请输入 Base URL" }]}
-          >
-            <Input placeholder="https://api.deepseek.com/v1" />
-          </Form.Item>
           <Form.Item
             name="api_key"
             label={editing ? "API Key（留空保留原值）" : "API Key"}
@@ -378,7 +377,13 @@ export default function SettingsPage() {
             label={
               <Space size={8}>
                 对话模型
-                <Button size="small" type="link" loading={fetchingModels} onClick={fetchModels} style={{ padding: 0 }}>
+                <Button
+                  size="small"
+                  type="link"
+                  loading={fetchingModels}
+                  onClick={fetchModels}
+                  style={{ padding: 0 }}
+                >
                   拉取模型列表
                 </Button>
               </Space>
@@ -387,36 +392,71 @@ export default function SettingsPage() {
           >
             <AutoComplete
               options={models.map((m) => ({ value: m }))}
-              placeholder="deepseek-chat（可先拉取列表再选择）"
+              placeholder="选模板已自动填；贴上 Key 后可拉取列表选择"
               filterOption={(input, option) =>
                 (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
               }
             />
           </Form.Item>
-          <Form.Item name="fallback_model" label="备用模型（可选，主模型故障时顶上）">
-            <AutoComplete
-              options={models.map((m) => ({ value: m }))}
-              placeholder="主模型连续失败时的备用"
-              filterOption={(input, option) =>
-                (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-              }
-            />
-          </Form.Item>
-          <Form.Item
-            name="embed_model"
-            label="知识库检索模型（可选；机器人靠它搜索知识库，推荐 text-embedding-3-small）"
-          >
-            <AutoComplete
-              options={models.map((m) => ({ value: m }))}
-              placeholder="text-embedding-3-small"
-              filterOption={(input, option) =>
-                (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-              }
-            />
-          </Form.Item>
-          <Form.Item name="supports_json_schema" valuePropName="checked" initialValue={true}>
-            <Checkbox>支持结构化输出（选模板时已自动设置，不确定就保持默认）</Checkbox>
-          </Form.Item>
+
+          <Collapse
+            ghost
+            activeKey={advancedOpen ? ["advanced"] : []}
+            onChange={(keys) => setAdvancedOpen(keys.includes("advanced"))}
+            items={[
+              {
+                key: "advanced",
+                forceRender: true,
+                label: (
+                  <span style={{ fontSize: 13, color: "#64748b" }}>
+                    高级选项（选了服务商模板就不用动）
+                  </span>
+                ),
+                children: (
+                  <>
+                    <Form.Item
+                      name="name"
+                      label="显示名称"
+                      rules={[{ required: true, message: "请输入名称" }]}
+                    >
+                      <Input placeholder="如 DeepSeek 官方" />
+                    </Form.Item>
+                    <Form.Item
+                      name="base_url"
+                      label="接口地址（OpenAI 兼容 Base URL）"
+                      rules={[{ required: true, message: "请输入接口地址" }]}
+                    >
+                      <Input placeholder="https://api.deepseek.com/v1" />
+                    </Form.Item>
+                    <Form.Item name="fallback_model" label="备用模型（可选，主模型故障时顶上）">
+                      <AutoComplete
+                        options={models.map((m) => ({ value: m }))}
+                        placeholder="留空 = 不用备用"
+                        filterOption={(input, option) =>
+                          (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+                        }
+                      />
+                    </Form.Item>
+                    <Form.Item
+                      name="embed_model"
+                      label="知识库检索模型（机器人靠它搜索知识库；OpenAI 填 text-embedding-3-small）"
+                    >
+                      <AutoComplete
+                        options={models.map((m) => ({ value: m }))}
+                        placeholder="留空则知识库检索走系统默认配置"
+                        filterOption={(input, option) =>
+                          (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+                        }
+                      />
+                    </Form.Item>
+                    <Form.Item name="supports_json_schema" valuePropName="checked" initialValue={true}>
+                      <Checkbox>支持结构化输出（选模板时已自动设置）</Checkbox>
+                    </Form.Item>
+                  </>
+                ),
+              },
+            ]}
+          />
         </Form>
       </Modal>
     </div>
