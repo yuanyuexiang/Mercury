@@ -9,6 +9,7 @@ import {
   LogoutOutlined,
   MessageOutlined,
   SettingOutlined,
+  ShareAltOutlined,
 } from "@ant-design/icons";
 import { Badge, Tooltip } from "antd";
 import Link from "next/link";
@@ -23,6 +24,7 @@ const NAV = [
   { key: "/dashboard", icon: <DashboardOutlined />, label: "概览" },
   { key: "/conversations", icon: <MessageOutlined />, label: "会话" },
   { key: "/leads", icon: <FunnelPlotOutlined />, label: "线索" },
+  { key: "/promotion", icon: <ShareAltOutlined />, label: "推广获客" },
   { key: "/knowledge", icon: <BookOutlined />, label: "知识库" },
   { key: "/settings", icon: <ApiOutlined />, label: "模型配置" },
   { key: "/system", icon: <SettingOutlined />, label: "系统设置" },
