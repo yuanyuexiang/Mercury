@@ -46,6 +46,75 @@ interface Gap {
   refused_at: string;
 }
 
+interface SetupStatus {
+  telegram: boolean;
+  operator: boolean;
+  llm: boolean;
+  knowledge: boolean;
+}
+
+const SETUP_ITEMS: Array<[keyof SetupStatus, string, string]> = [
+  ["telegram", "连接 Telegram 机器人", "/system"],
+  ["operator", "设置通知接收人", "/system"],
+  ["llm", "配置 AI 模型", "/settings"],
+  ["knowledge", "上传知识库文档", "/knowledge"],
+];
+
+function SetupCard({ status }: { status: SetupStatus }) {
+  const doneCount = SETUP_ITEMS.filter(([key]) => status[key]).length;
+  return (
+    <Card
+      style={{ marginBottom: 16, borderColor: "#ADC6FF", background: "#F0F5FF" }}
+      styles={{ body: { padding: "16px 20px" } }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <Typography.Text strong style={{ fontSize: 15 }}>
+          🚀 快速开始（{doneCount}/{SETUP_ITEMS.length}）
+        </Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          完成四步，机器人即可开始接待客户
+        </Typography.Text>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "10px 28px", marginTop: 12 }}>
+        {SETUP_ITEMS.map(([key, label, href], i) => (
+          <Link
+            key={key}
+            href={href}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 13.5,
+              color: status[key] ? "#52C41A" : "#1e293b",
+              textDecoration: "none",
+            }}
+          >
+            <span
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: "50%",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 12,
+                fontWeight: 600,
+                background: status[key] ? "#52C41A" : "#fff",
+                color: status[key] ? "#fff" : "#2F54EB",
+                border: status[key] ? "none" : "1.5px solid #2F54EB",
+              }}
+            >
+              {status[key] ? "✓" : i + 1}
+            </span>
+            <span style={{ textDecoration: status[key] ? "line-through" : "none" }}>{label}</span>
+            {!status[key] && <RightOutlined style={{ fontSize: 10, color: "#94a3b8" }} />}
+          </Link>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 interface HotLead {
   id: number;
   company: string | null;
@@ -220,11 +289,13 @@ export default function DashboardPage() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [gaps, setGaps] = useState<Gap[]>([]);
   const [hotLeads, setHotLeads] = useState<HotLead[]>([]);
+  const [setup, setSetup] = useState<SetupStatus | null>(null);
 
   useEffect(() => {
     const tz = -new Date().getTimezoneOffset();
     api.get<Overview>(`/api/metrics/overview?tz_offset_minutes=${tz}`).then(setOverview);
     api.get<{ items: Gap[] }>("/api/metrics/knowledge-gaps").then((d) => setGaps(d.items));
+    api.get<SetupStatus>("/api/settings/setup-status").then(setSetup);
     api
       .get<{ items: HotLead[] }>("/api/leads?grade=high&sort=recent")
       .then((d) => setHotLeads(d.items.slice(0, 6)));
@@ -233,6 +304,7 @@ export default function DashboardPage() {
   return (
     <div>
       <PageHeader title="概览" subtitle={`获客漏斗与近 ${overview?.window_days ?? 14} 天趋势`} />
+      {setup && Object.values(setup).some((v) => !v) && <SetupCard status={setup} />}
       <Row gutter={[16, 16]}>
         <Col xs={12} xl={6}>
           <BigStat
@@ -307,7 +379,7 @@ export default function DashboardPage() {
                 return (
                   <div
                     key={l.id}
-                    onClick={() => router.push(`/leads/${l.id}`)}
+                    onClick={() => router.push(`/leads?id=${l.id}`)}
                     style={{
                       display: "flex",
                       alignItems: "center",

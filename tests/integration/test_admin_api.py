@@ -531,3 +531,52 @@ async def test_system_settings_general_reflects_in_meta(client) -> None:
     data = (await client.get("/api/settings/general")).json()
     assert data == {"brand_name": "Acme", "bot_tone_hint": "Friendly"}
     assert (await client.get("/api/meta")).json()["brand_name"] == "Acme"
+
+
+async def test_setup_status_progression(client, session_factory) -> None:
+    """快速开始清单：四项状态随配置逐项翻绿。"""
+    await _login(client)
+    # Settings 会读本地 .env（可能配了真实 LLM key），显式清空保证初始态干净
+    client.app.state.settings.llm_api_key = ""
+    client.app.state.settings.llm_chat_model = ""
+    status = (await client.get("/api/settings/setup-status")).json()
+    assert status == {"telegram": False, "operator": False, "llm": False, "knowledge": False}
+
+    # 配 telegram + operator（走后台 PUT）
+    resp = await client.put(
+        "/api/settings/telegram",
+        json={"bot_token": "123456:ABCdef", "operator_chat_id": "4242"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    # llm：env 兜底即算配置
+    client.app.state.settings.llm_api_key = "sk-test"
+    client.app.state.settings.llm_chat_model = "gpt-test"
+    # knowledge：插入一篇 active 文档
+    from domain.models import KnowledgeDocument
+
+    async with session_factory() as session:
+        session.add(KnowledgeDocument(title="产品介绍", source_type="markdown", status="active"))
+        await session.commit()
+
+    status = (await client.get("/api/settings/setup-status")).json()
+    assert status == {"telegram": True, "operator": True, "llm": True, "knowledge": True}
+    client.app.state.settings.llm_api_key = ""
+    client.app.state.settings.llm_chat_model = ""
+
+
+async def test_telegram_candidates_from_webhook_traffic(client, session_factory) -> None:
+    """Chat ID 自动检测：从最近 webhook 消息提取发信人，客户无需 curl getUpdates。"""
+    await _login(client)
+    assert (await client.get("/api/settings/telegram/candidates")).json()["items"] == []
+
+    async with session_factory() as session:
+        await repositories.insert_update(session, 801, tg_update(801, "我是管理员", chat_id=777))
+        await repositories.insert_update(session, 802, tg_update(802, "第二条", chat_id=777))
+        await repositories.insert_update(session, 803, tg_update(803, "hello", chat_id=888))
+        await session.commit()
+
+    items = (await client.get("/api/settings/telegram/candidates")).json()["items"]
+    assert [i["chat_id"] for i in items] == [888, 777]  # 最新在前、同 chat 去重
+    assert items[1]["kind"] == "私聊" and "Test" in items[1]["name"]
+    assert items[1]["last_text"] == "第二条"

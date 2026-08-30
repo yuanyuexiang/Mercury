@@ -1,12 +1,26 @@
 "use client";
-// 系统设置：Telegram 对接（token 加密存库、保存自动验证并注册 webhook）+ 品牌文案。
+// 系统设置：Telegram 接入向导（三步引导 + Chat ID 自动检测，零命令行）+ 品牌文案。
 // 全部 DB 优先 env 兜底，保存即生效（无需重启）。
-import { SendOutlined } from "@ant-design/icons";
-import { Alert, App, Button, Card, Form, Input, Space, Tag, Typography } from "antd";
+import { CheckCircleFilled, RadarChartOutlined, SendOutlined } from "@ant-design/icons";
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Empty,
+  Form,
+  Input,
+  Modal,
+  Space,
+  Steps,
+  Tag,
+  Typography,
+} from "antd";
 import { useCallback, useEffect, useState } from "react";
 
 import PageHeader from "@/components/PageHeader";
 import { api, ApiError } from "@/lib/api";
+import { fromNow } from "@/lib/ui";
 
 interface TelegramConf {
   bot_token_masked: string;
@@ -20,19 +34,25 @@ interface GeneralConf {
   bot_tone_hint: string;
 }
 
-const SOURCE_LABEL: Record<string, { label: string; color: string }> = {
-  db: { label: "后台配置", color: "success" },
-  env: { label: "环境变量兜底", color: "default" },
-  none: { label: "未配置", color: "warning" },
-};
+interface Candidate {
+  chat_id: number;
+  kind: string;
+  name: string;
+  last_text: string;
+  received_at: string;
+}
 
 export default function SystemSettingsPage() {
   const { message } = App.useApp();
   const [tg, setTg] = useState<TelegramConf | null>(null);
+  const [botUsername, setBotUsername] = useState("");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [savingGeneral, setSavingGeneral] = useState(false);
-  const [tgForm] = Form.useForm();
+  const [detectOpen, setDetectOpen] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [tokenInput, setTokenInput] = useState("");
   const [generalForm] = Form.useForm();
 
   const load = useCallback(async () => {
@@ -41,42 +61,33 @@ export default function SystemSettingsPage() {
       api.get<GeneralConf>("/api/settings/general"),
     ]);
     setTg(t);
-    tgForm.setFieldsValue({ operator_chat_id: t.operator_chat_id });
     generalForm.setFieldsValue(g);
-  }, [tgForm, generalForm]);
+  }, [generalForm]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const saveTelegram = async (values: { bot_token?: string; operator_chat_id?: string }) => {
-    const body: Record<string, string> = {};
-    if (values.bot_token?.trim()) body.bot_token = values.bot_token.trim();
-    if (values.operator_chat_id !== undefined)
-      body.operator_chat_id = values.operator_chat_id.trim();
-    if (Object.keys(body).length === 0) {
-      message.info("没有要保存的内容");
+  const saveToken = async () => {
+    if (!tokenInput.trim()) {
+      message.info("请粘贴 Bot Token");
       return;
     }
     setSaving(true);
     try {
       const res = await api.put<{ bot_username: string; webhook: string }>(
         "/api/settings/telegram",
-        body,
+        { bot_token: tokenInput.trim() },
       );
+      setBotUsername(res.bot_username);
       const webhookText =
         res.webhook === "registered"
-          ? "，webhook 已自动注册"
+          ? "，消息通道已自动接通"
           : res.webhook === "failed"
-            ? "，但 webhook 注册失败（可稍后重试）"
-            : res.webhook === "skipped"
-              ? "，webhook 未注册（服务器未配置公网地址）"
-              : "";
-      message.success(
-        (res.bot_username ? `已连接 @${res.bot_username}` : "已保存") + webhookText,
-        6,
-      );
-      tgForm.setFieldValue("bot_token", "");
+            ? "，但消息通道注册失败（可重新保存重试）"
+            : "";
+      message.success(`已连接 @${res.bot_username}${webhookText}`, 6);
+      setTokenInput("");
       await load();
     } catch (e) {
       message.error(e instanceof ApiError ? e.message : "保存失败");
@@ -85,11 +96,35 @@ export default function SystemSettingsPage() {
     }
   };
 
+  const detect = async () => {
+    setDetecting(true);
+    try {
+      const data = await api.get<{ items: Candidate[] }>("/api/settings/telegram/candidates");
+      setCandidates(data.items);
+      setDetectOpen(true);
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "检测失败");
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const pickCandidate = async (c: Candidate) => {
+    try {
+      await api.put("/api/settings/telegram", { operator_chat_id: String(c.chat_id) });
+      setDetectOpen(false);
+      message.success(`通知将发送给 ${c.name}`);
+      await load();
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "保存失败");
+    }
+  };
+
   const sendTest = async () => {
     setTesting(true);
     try {
       await api.post("/api/settings/telegram/test");
-      message.success("测试通知已发送，请查看 Telegram");
+      message.success("测试通知已发送，请打开 Telegram 查看");
     } catch (e) {
       message.error(e instanceof ApiError ? e.message : "发送失败");
     } finally {
@@ -109,24 +144,22 @@ export default function SystemSettingsPage() {
     }
   };
 
-  const source = SOURCE_LABEL[tg?.bot_token_source ?? "none"];
+  const hasToken = !!tg?.bot_token_masked;
+  const hasOperator = !!tg?.operator_chat_id;
+  const currentStep = !hasToken ? 0 : !hasOperator ? 2 : 3;
 
   return (
     <div>
-      <PageHeader title="系统设置" subtitle="Telegram 对接与品牌配置——保存即生效，无需重启" />
+      <PageHeader title="系统设置" subtitle="Telegram 接入与品牌配置——保存即生效，无需重启" />
 
       <Card
-        title="Telegram 对接"
+        title="Telegram 接入"
         extra={
-          tg && (
-            <Space size={8}>
-              <Tag color={source.color}>{source.label}</Tag>
-              {tg.bot_token_masked && (
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  当前 Token：{tg.bot_token_masked}
-                </Typography.Text>
-              )}
-            </Space>
+          hasToken &&
+          hasOperator && (
+            <Tag icon={<CheckCircleFilled />} color="success">
+              接入完成
+            </Tag>
           )
         }
       >
@@ -135,33 +168,88 @@ export default function SystemSettingsPage() {
             type="warning"
             showIcon
             style={{ marginBottom: 16 }}
-            message="服务器未配置公网地址（PUBLIC_BASE_URL / TELEGRAM_WEBHOOK_SECRET），保存 Token 后无法自动注册 webhook"
+            message="服务器未配置公网地址（PUBLIC_BASE_URL / TELEGRAM_WEBHOOK_SECRET），保存 Token 后无法自动接通消息通道"
           />
         )}
-        <Form form={tgForm} layout="vertical" onFinish={saveTelegram} style={{ maxWidth: 560 }}>
-          <Form.Item
-            name="bot_token"
-            label="Bot Token"
-            extra="在 Telegram 搜索 @BotFather → /newbot 创建机器人后获得。留空表示不修改；保存时自动验证有效性并注册 webhook。"
-          >
-            <Input.Password placeholder={tg?.bot_token_masked ? "已配置（输入新值以更换）" : "123456789:ABC-…"} />
-          </Form.Item>
-          <Form.Item
-            name="operator_chat_id"
-            label="通知接收 Chat ID"
-            extra="高意向线索、转人工请求会推送到这个 Telegram 账号/群。个人 ID 获取：给 @userinfobot 发条消息即可看到。"
-          >
-            <Input placeholder="如 123456789（群为负数）" />
-          </Form.Item>
-          <Space>
-            <Button type="primary" htmlType="submit" loading={saving}>
-              保存并验证
-            </Button>
-            <Button icon={<SendOutlined />} loading={testing} onClick={sendTest}>
-              发送测试通知
-            </Button>
-          </Space>
-        </Form>
+        <Steps
+          direction="vertical"
+          current={currentStep}
+          items={[
+            {
+              title: "创建你的机器人",
+              description: (
+                <div style={{ fontSize: 13, color: "#64748b", paddingBottom: 8 }}>
+                  在 Telegram 打开{" "}
+                  <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">
+                    @BotFather
+                  </a>{" "}
+                  → 发送 <Typography.Text code>/newbot</Typography.Text> → 按提示起名字（用户名须以
+                  bot 结尾）→ 复制它返回的一长串 Token（形如{" "}
+                  <Typography.Text code>123456:ABC-xxx</Typography.Text>）。已有机器人可直接进入下一步。
+                </div>
+              ),
+            },
+            {
+              title: hasToken ? `已连接机器人${botUsername ? ` @${botUsername}` : ""}` : "粘贴 Token，连接机器人",
+              description: (
+                <div style={{ paddingBottom: 8, maxWidth: 520 }}>
+                  <Space.Compact style={{ width: "100%" }}>
+                    <Input.Password
+                      value={tokenInput}
+                      onChange={(e) => setTokenInput(e.target.value)}
+                      placeholder={
+                        hasToken ? `已配置（${tg?.bot_token_masked}，输入新值可更换）` : "123456789:ABC-…"
+                      }
+                    />
+                    <Button type="primary" loading={saving} onClick={saveToken}>
+                      保存并验证
+                    </Button>
+                  </Space.Compact>
+                  <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 6 }}>
+                    保存时自动验证 Token 有效性，并接通 Telegram 消息通道（webhook）。
+                  </div>
+                </div>
+              ),
+            },
+            {
+              title: hasOperator ? `通知接收人已设置（Chat ID ${tg?.operator_chat_id}）` : "设置谁接收通知",
+              description: (
+                <div style={{ paddingBottom: 8, maxWidth: 520 }}>
+                  <div style={{ fontSize: 13, color: "#64748b", marginBottom: 8 }}>
+                    高意向线索、转人工请求会推送到这个人（或群）。操作：用<b>你自己的 Telegram</b>{" "}
+                    给机器人随便发一句话（群接收则把机器人拉进群后在群里发），然后点检测：
+                  </div>
+                  <Space>
+                    <Button
+                      icon={<RadarChartOutlined />}
+                      loading={detecting}
+                      onClick={detect}
+                      disabled={!hasToken}
+                    >
+                      检测最近联系人
+                    </Button>
+                    <Button
+                      icon={<SendOutlined />}
+                      loading={testing}
+                      onClick={sendTest}
+                      disabled={!hasOperator}
+                    >
+                      发送测试通知
+                    </Button>
+                  </Space>
+                </div>
+              ),
+            },
+            {
+              title: "完成",
+              description: (
+                <div style={{ fontSize: 13, color: "#64748b" }}>
+                  接下来到「模型配置」激活 AI 供应商、「知识库」上传产品资料，机器人就能开始接客了。
+                </div>
+              ),
+            },
+          ]}
+        />
       </Card>
 
       <Card title="品牌与语气" style={{ marginTop: 16 }}>
@@ -185,6 +273,72 @@ export default function SystemSettingsPage() {
           </Button>
         </Form>
       </Card>
+
+      <Modal
+        title="选择通知接收人"
+        open={detectOpen}
+        onCancel={() => setDetectOpen(false)}
+        footer={null}
+      >
+        {candidates.length === 0 ? (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={
+              <span>
+                还没有检测到消息。请先用你的 Telegram 给机器人发一句话
+                {botUsername && (
+                  <>
+                    （
+                    <a href={`https://t.me/${botUsername}`} target="_blank" rel="noreferrer">
+                      打开 @{botUsername}
+                    </a>
+                    ）
+                  </>
+                )}
+                ，再点一次检测。
+              </span>
+            }
+          />
+        ) : (
+          candidates.map((c) => (
+            <div
+              key={c.chat_id}
+              onClick={() => pickCandidate(c)}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 12,
+                padding: "10px 12px",
+                border: "1px solid #f1f5f9",
+                borderRadius: 8,
+                marginBottom: 8,
+                cursor: "pointer",
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 570, fontSize: 13.5 }}>
+                  {c.name} <Tag style={{ fontSize: 11 }}>{c.kind}</Tag>
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "#94a3b8",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {c.last_text || "（非文本消息）"} · {fromNow(c.received_at)}
+                </div>
+              </div>
+              <Button size="small" type="primary">
+                选 TA
+              </Button>
+            </div>
+          ))
+        )}
+      </Modal>
     </div>
   );
 }

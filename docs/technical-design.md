@@ -549,6 +549,8 @@ ai_active ──user_request/sensitive/manual──▶ handoff_pending ──管
   - `GET/PUT /api/settings/telegram` → Bot Token（保存前 getMe 验证，无效 422；成功后自动注册 webhook；回显一律脱敏末 4 位）+ 通知接收 Chat ID；
   - `POST /api/settings/telegram/test` → 给通知接收人发测试消息，验证全链路；
   - `GET/PUT /api/settings/general` → 品牌名称 / 回复语气（欢迎语、RAG 提示词、后台白标即时生效）；
+  - `GET /api/settings/setup-status` → 接入四项（telegram/operator/llm/knowledge）是否就绪，概览页「快速开始」清单用；
+  - `GET /api/settings/telegram/candidates` → 从最近 webhook 消息提取发信 chat 候选（通知接收人自动检测，客户无需 curl getUpdates）；
   - 发送侧 `DynamicSender`：每次发送解析当前 token，token 变化重建连接，无 token 退化为 LoggingSender。
 - 模型供应商配置：
   - `GET /api/settings/llm-providers` → 列表（api_key 一律脱敏为末 4 位，写入后不可读回明文）；

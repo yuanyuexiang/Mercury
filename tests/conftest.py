@@ -29,6 +29,7 @@ _TABLES = (
     "knowledge_chunks",
     "knowledge_documents",
     "llm_providers",
+    "app_settings",
 )
 
 

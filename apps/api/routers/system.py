@@ -8,6 +8,7 @@ from typing import Any
 
 import structlog
 from domain import repositories
+from domain.models import KnowledgeDocument, LlmProvider, TelegramUpdate
 from fastapi import APIRouter, HTTPException, Request
 from integrations.app_settings import (
     KEY_BOT_TONE_HINT,
@@ -17,6 +18,7 @@ from integrations.app_settings import (
     publish_invalidation,
 )
 from pydantic import BaseModel
+from sqlalchemy import func, select
 
 from api.deps import AdminRead, AdminWrite
 
@@ -129,6 +131,76 @@ async def test_telegram(request: Request) -> dict[str, Any]:
             status_code=502, detail="发送失败：请检查 Chat ID 是否正确、是否已与机器人对话过"
         ) from exc
     return {"ok": True}
+
+
+@router.get("/setup-status", dependencies=AdminRead)
+async def setup_status(request: Request) -> dict[str, bool]:
+    """接入进度（快速开始清单用）：四项是否已配置，全 true = 可开门迎客。"""
+    store = request.app.state.app_settings_store
+    settings = request.app.state.settings
+    async with request.app.state.session_factory() as session:
+        llm_db = (
+            await session.execute(
+                select(func.count()).select_from(LlmProvider).where(LlmProvider.is_active)
+            )
+        ).scalar() or 0
+        knowledge_active = (
+            await session.execute(
+                select(func.count())
+                .select_from(KnowledgeDocument)
+                .where(KnowledgeDocument.status == "active")
+            )
+        ).scalar() or 0
+    return {
+        "telegram": bool(await store.telegram_bot_token()),
+        "operator": bool(await store.operator_chat_id()),
+        "llm": bool(llm_db) or bool(settings.llm_api_key and settings.llm_chat_model),
+        "knowledge": knowledge_active > 0,
+    }
+
+
+@router.get("/telegram/candidates", dependencies=AdminRead)
+async def telegram_candidates(request: Request) -> dict[str, Any]:
+    """通知接收人自动检测：从最近 webhook 消息里提取发信 chat 供点选——
+    客户给机器人发一句话即可，无需 curl getUpdates。"""
+    async with request.app.state.session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(TelegramUpdate).order_by(TelegramUpdate.update_id.desc()).limit(50)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    items: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for row in rows:
+        message = (row.payload or {}).get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        if chat_id is None or chat_id in seen:
+            continue
+        seen.add(chat_id)
+        sender = message.get("from") or {}
+        if chat.get("type") == "private":
+            name = sender.get("first_name") or sender.get("username") or str(chat_id)
+            if sender.get("username"):
+                name = f"{name}（@{sender['username']}）"
+        else:
+            name = chat.get("title") or f"群 {chat_id}"
+        items.append(
+            {
+                "chat_id": chat_id,
+                "kind": "私聊" if chat.get("type") == "private" else "群组",
+                "name": name,
+                "last_text": (message.get("text") or "")[:50],
+                "received_at": row.received_at.isoformat(),
+            }
+        )
+        if len(items) >= 5:
+            break
+    return {"items": items}
 
 
 @router.get("/general", dependencies=AdminRead)
