@@ -1,9 +1,14 @@
 """机器人固定文案（非 LLM 提示词——那些在 packages/llm/prompts.py）。中英双语后续按需扩展。"""
 
-WELCOME = (
-    "你好！我是客服助手，可以回答关于我们产品的问题。\n"
-    "隐私说明：对话内容仅用于客服与销售跟进，输入 /human 可随时转人工。"
-)
+
+def welcome(brand_name: str = "") -> str:
+    """欢迎语（/start）：品牌名按客户实例配置（§20）。"""
+    who = f"{brand_name}客服助手" if brand_name else "客服助手"
+    return (
+        f"你好！我是{who}，可以回答关于我们产品的问题。\n"
+        "隐私说明：对话内容仅用于客服与销售跟进，输入 /human 可随时转人工。"
+    )
+
 
 RESET_DONE = "会话已重新开始。请问有什么可以帮您？"
 

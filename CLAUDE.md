@@ -14,9 +14,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 写任何代码前先读技术方案对应章节；表名、状态值、接口以技术方案为准，不即兴改名。新的设计决策要落回技术方案文档。
 
+## 产品定位（技术方案 §20）
+
+**产品化定制服务路线**：80% 标准内核 + 20% 配置面，每客户独立 Docker 实例（独立数据库），单一 main 分支；3–5 个付费客户后再决定 SaaS 化。核心表已含 `tenant_id`（migration 0005，独立实例阶段恒为 1，查询**不做**租户过滤）；每客户定制只走配置：`BRAND_NAME`/`BOT_TONE_HINT`（欢迎语与 RAG 提示词）、`SCORING_OVERRIDES`（评分 JSON 覆盖，`domain/scoring.py::config_from_json`）、后台模型配置与知识库、`LeadSync` 端口换 CRM 实现。**红线：代码里禁止出现客户名称、客户分支、客户专属 if。** SaaS 化转换清单见 §20.4（含 telegram_updates PK 改造），现在不做。
+
 ## 当前进度
 
-**M1–M8 完成，并通过第三轮外部评审修订**（技术方案 v1.3，2026-08-30）。修订要点：api/worker 共享 storage volume；`.dockerignore`（两镜像均实测构建通过）；webhook 数据库未落库返回 503 让 Telegram 重推（落库后入队失败才返回 200 交扫描器）；SSRF 抓取逐跳校验（`integrations/netguard.py`）；`messages.source_update_id` 外键 SET NULL（migration 0003，保留期清理不再被阻断）；用户数据删除 API `DELETE /api/users/by-telegram/{id}`；extract_lead 原子抢占（replied→extracting，扫描器③'恢复）；同 chat 顺序守卫（更早未完成 update 让位）；生产安全底线（https 环境启动强制校验 JWT/凭据，JWT 校验 sub）；删文档同时删原始文件。剩余为运营侧工作（配真实凭据跑演示验收剧本、录 Demo、客户清单）。
+**M1–M8 完成，并通过第三轮外部评审修订**（技术方案 v1.4，2026-08-30）。修订要点：api/worker 共享 storage volume；`.dockerignore`（两镜像均实测构建通过）；webhook 数据库未落库返回 503 让 Telegram 重推（落库后入队失败才返回 200 交扫描器）；SSRF 抓取逐跳校验（`integrations/netguard.py`）；`messages.source_update_id` 外键 SET NULL（migration 0003，保留期清理不再被阻断）；用户数据删除 API `DELETE /api/users/by-telegram/{id}`；extract_lead 原子抢占（replied→extracting，扫描器③'恢复）；同 chat 顺序守卫（更早未完成 update 让位）；生产安全底线（https 环境启动强制校验 JWT/凭据，JWT 校验 sub）；删文档同时删原始文件。剩余为运营侧工作（配真实凭据跑演示验收剧本、录 Demo、客户清单）。
 
 M8 说明：后台 API 全量在 `apps/api/routers/`（认证 cookie JWT + bcrypt + 登录限流；写接口需 `X-Requested-With: fetch` CSRF 头）；供应商配置在 `llm/provider_config.py`——Fernet 加密（主密钥 `SETTINGS_ENCRYPTION_KEY`，生成：`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`）、DB 优先 env 兜底、60s 缓存 + Redis 广播失效，worker 用 `DynamicChatClient` 每次调用解析配置（切换供应商不重启即生效）；SSRF 防护在 `api/netguard.py`（自建推理服务用 `ALLOW_PRIVATE_LLM_BASE_URL=true` 放开）。LLM 全量后台可配（含 embedding，`DynamicEmbedder` + 1536 维守卫）；env 的 LLM_* 仅为兜底。前端 8 页在 `apps/web/src/app/`（AntD 5 + React 19 补丁包）。部署：`deploy/compose.prod.yaml`（接既有 Traefik、migrate 一次性服务、每日备份保留 14 份）+ `deploy/deploy.sh`（健康检查失败自动回滚上一 tag）+ `.github/workflows/deploy.yml`（push main → GHCR → SSH；回滚 = workflow_dispatch 填历史 sha-* tag）。服务器初始化：`/opt/mercury/` 放 compose.prod.yaml + deploy.sh + .env，GitHub secrets 配 DEPLOY_HOST/USER/SSH_KEY。
 

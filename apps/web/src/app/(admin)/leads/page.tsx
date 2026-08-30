@@ -1,10 +1,12 @@
 "use client";
-// 线索列表（技术方案 §10）：按分数排序、等级筛选。
-import { Select, Space, Table, Tag, Typography } from "antd";
+// 线索列表：等级配色 + 分数条 + 同步状态。
+import { Avatar, Select, Space, Table, Tag } from "antd";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
+import PageHeader from "@/components/PageHeader";
 import { api } from "@/lib/api";
+import { avatarColor, fromNow, GRADE, initialOf, LEAD_STATUS } from "@/lib/ui";
 
 interface LeadRow {
   id: number;
@@ -19,21 +21,25 @@ interface LeadRow {
   updated_at: string;
 }
 
-const GRADE_COLORS: Record<string, string> = { high: "red", medium: "orange", low: "default" };
-
 export default function LeadsPage() {
   const router = useRouter();
   const [rows, setRows] = useState<LeadRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [grade, setGrade] = useState<string | undefined>();
+  const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
-    const params = new URLSearchParams({ page: String(page) });
-    if (grade) params.set("grade", grade);
-    const data = await api.get<{ items: LeadRow[]; total: number }>(`/api/leads?${params}`);
-    setRows(data.items);
-    setTotal(data.total);
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page: String(page) });
+      if (grade) params.set("grade", grade);
+      const data = await api.get<{ items: LeadRow[]; total: number }>(`/api/leads?${params}`);
+      setRows(data.items);
+      setTotal(data.total);
+    } finally {
+      setLoading(false);
+    }
   }, [page, grade]);
 
   useEffect(() => {
@@ -42,49 +48,83 @@ export default function LeadsPage() {
 
   return (
     <div>
-      <Typography.Title level={4}>线索</Typography.Title>
-      <Space style={{ marginBottom: 16 }}>
-        <Select
-          allowClear
-          placeholder="等级筛选"
-          style={{ width: 140 }}
-          value={grade}
-          onChange={(v) => {
-            setPage(1);
-            setGrade(v);
-          }}
-          options={[
-            { value: "high", label: "高意向" },
-            { value: "medium", label: "中意向" },
-            { value: "low", label: "低意向" },
-          ]}
-        />
-      </Space>
+      <PageHeader
+        title="线索"
+        subtitle="按评分从高到低排序——优先跟进高意向"
+        extra={
+          <Select
+            allowClear
+            placeholder="全部等级"
+            style={{ width: 140 }}
+            value={grade}
+            onChange={(v) => {
+              setPage(1);
+              setGrade(v);
+            }}
+            options={Object.entries(GRADE).map(([value, g]) => ({ value, label: g.label }))}
+          />
+        }
+      />
       <Table<LeadRow>
         rowKey="id"
         dataSource={rows}
+        loading={loading}
         onRow={(row) => ({
           onClick: () => router.push(`/leads/${row.id}`),
           style: { cursor: "pointer" },
         })}
-        pagination={{ current: page, total, pageSize: 20, onChange: setPage }}
+        pagination={{ current: page, total, pageSize: 20, onChange: setPage, showTotal: (t) => `共 ${t} 条线索` }}
         columns={[
-          { title: "ID", dataIndex: "id", width: 70 },
           {
-            title: "等级",
-            width: 120,
-            render: (_, r) => <Tag color={GRADE_COLORS[r.grade]}>{`${r.grade}（${r.score}）`}</Tag>,
+            title: "客户",
+            width: 240,
+            render: (_, row) => {
+              const name = row.company ?? (row.user?.username ? `@${row.user.username}` : `线索 #${row.id}`);
+              return (
+                <Space>
+                  <Avatar
+                    shape="square"
+                    style={{ background: avatarColor(row.user?.telegram_user_id ?? row.id), borderRadius: 8 }}
+                  >
+                    {initialOf(name)}
+                  </Avatar>
+                  <div style={{ lineHeight: 1.3 }}>
+                    <div style={{ fontWeight: 550 }}>{name}</div>
+                    <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                      {row.business_email ?? (row.user?.username ? `@${row.user.username}` : "—")}
+                    </div>
+                  </div>
+                </Space>
+              );
+            },
           },
-          { title: "公司", dataIndex: "company", render: (v) => v ?? "-" },
-          { title: "邮箱", dataIndex: "business_email", render: (v) => v ?? "-" },
-          { title: "需求", dataIndex: "requirement", ellipsis: true, render: (v) => v ?? "-" },
           {
-            title: "用户",
-            render: (_, r) =>
-              r.user?.username ? `@${r.user.username}` : (r.user?.telegram_user_id ?? "-"),
+            title: "评分",
+            width: 170,
+            render: (_, row) => (
+              <Space size={8}>
+                <span style={{ fontWeight: 700, fontSize: 16, width: 34, display: "inline-block" }}>
+                  {row.score}
+                </span>
+                <Tag color={GRADE[row.grade]?.color}>{GRADE[row.grade]?.label}</Tag>
+              </Space>
+            ),
           },
-          { title: "状态", dataIndex: "status", width: 90 },
-          { title: "更新时间", dataIndex: "updated_at", width: 180 },
+          {
+            title: "需求",
+            dataIndex: "requirement",
+            ellipsis: true,
+            render: (v: string | null) => v ?? <span style={{ color: "#cbd5e1" }}>—</span>,
+          },
+          {
+            title: "同步状态",
+            dataIndex: "status",
+            width: 110,
+            render: (s: string) => (
+              <Tag color={LEAD_STATUS[s]?.color}>{LEAD_STATUS[s]?.label ?? s}</Tag>
+            ),
+          },
+          { title: "更新时间", dataIndex: "updated_at", width: 120, render: fromNow },
         ]}
       />
     </div>

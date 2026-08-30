@@ -76,6 +76,8 @@ async def generate_answer(
     deadline: "Deadline",
     top_k: int = 6,
     min_similarity: float = 0.60,
+    brand_name: str = "",
+    tone_hint: str = "",
 ) -> "RagAnswer":
     """检索 + 受约束生成（§6 第 3d 步）。检索为空 / 预算耗尽 / 模型说无法确认 → refused。"""
     chunks = await retrieve(session, embedder, question, top_k, min_similarity)
@@ -90,7 +92,11 @@ async def generate_answer(
         f"[{i + 1}] ({c.document_title}) {c.content}" for i, c in enumerate(chunks)
     )
     system = RAG_SYSTEM.format(
-        no_answer_marker=NO_ANSWER_MARKER, language=language, materials=materials
+        no_answer_marker=NO_ANSWER_MARKER,
+        language=language,
+        materials=materials,
+        brand=brand_name or "this company",
+        tone_hint=f"\nTone: {tone_hint}" if tone_hint else "",
     )
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system},

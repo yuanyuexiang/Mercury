@@ -97,13 +97,17 @@ def _history_from_messages(messages: list[Message]) -> list[dict[str, str]]:
     return history
 
 
-def _route_command(command: str, update_id: int, conversation: Conversation) -> ReplyPlan | None:
+def _route_command(
+    command: str, update_id: int, conversation: Conversation, brand_name: str = ""
+) -> ReplyPlan | None:
     """命令分支（不经 LLM，§6 第 3a 步）。返回 None 表示不是已知命令。"""
     if command == "/start":
         return ReplyPlan(
             messages=[
                 PlannedMessage(
-                    delivery_key=f"reply:{update_id}", text=texts.WELCOME, sender_type="system"
+                    delivery_key=f"reply:{update_id}",
+                    text=texts.welcome(brand_name),
+                    sender_type="system",
                 )
             ]
         )
@@ -312,6 +316,7 @@ async def run_process_update(
     brain: Brain | None,
     update_id: int,
     reply_deadline_s: float = 5.0,
+    brand_name: str = "",
 ) -> PipelineOutcome:
     """process_update 管线（§6）。arq 任务是它的薄包装。"""
     async with session_factory() as session:
@@ -391,7 +396,9 @@ async def run_process_update(
                         plan = await _handle_human_command(session, conversation, update_id)
                     else:
                         routed = (
-                            _route_command(command, update_id, conversation) if command else None
+                            _route_command(command, update_id, conversation, brand_name)
+                            if command
+                            else None
                         )
                         if routed is not None:
                             plan = routed

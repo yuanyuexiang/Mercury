@@ -1,6 +1,6 @@
 # 技术实现方案
 
-Telegram AI 客服与询盘转化系统 — 实现级设计 v1.3（2026-08-30，三轮外部评审修订：可靠性 + 生产安全）
+Telegram AI 客服与询盘转化系统 — 实现级设计 v1.4（2026-08-30，三轮外部评审修订 + §20 产品化定制路线：租户边界预留与配置面定案）
 
 - 上游文档：[Telegram-AI-Lead-System-MVP.md](./Telegram-AI-Lead-System-MVP.md)（需求与边界以它为准；其 §6 技术建议已被本文档替代）
 - 本文档用途：指导代码生成。所有"二选一"已在此定案，代码生成阶段不再做架构决策。
@@ -730,3 +730,44 @@ main 开分支保护：CI 全绿才能合并。单人开发也走「短命分支
 - 新增设计决策（本文档未覆盖的）落回本文档，保持它是唯一实现级事实来源。
 - Python 3.12 语法基线；全链路 async；`domain` 包保持零框架依赖。
 - 提示词全部集中在 `packages/llm/prompts.py`，中英双语模板，禁止散落在业务代码里。
+
+---
+
+## 20. 商业路线与多客户架构（v1.4，2026-08-30 定案）
+
+**路线：产品化定制服务**——先给客户定制交付，但按 SaaS 架构开发；拿到 3–5 个付费客户后再决定是否开放标准 SaaS。当前形态：**单一代码库 + 单一 main 分支 + 每客户独立 Docker 实例（独立数据库）**。
+
+### 20.1 80% 标准内核（禁止按客户改代码）
+
+消息管线与幂等机制（§5/§6）、RAG 与拒答路径、线索提取/合并/评分引擎、人工接管状态机（§9）、同步任务框架（§11）、后台管理端、部署管线。这些只能通过版本升级演进，所有客户实例跟随 main。
+
+### 20.2 20% 配置面（每客户实例只改配置，不改代码）
+
+| 定制点 | 载体 |
+|---|---|
+| 品牌名 / 回复语气 | env：`BRAND_NAME`、`BOT_TONE_HINT`（注入欢迎语与 RAG 系统提示词） |
+| 评分规则（分值/阈值/团队规模下限/免费邮箱域） | env：`SCORING_OVERRIDES`（JSON，见 `domain/scoring.py::config_from_json`） |
+| Bot Token / 运营者通知 | env：`TELEGRAM_BOT_TOKEN`、`OPERATOR_TELEGRAM_CHAT_ID` |
+| LLM 供应商与模型 | 后台「模型配置」页（llm_providers 表，§12） |
+| 知识库内容 | 后台「知识库」页上传 |
+| CRM 目标 | `LeadSync` 端口的实现选择（现有 gspread；新 CRM = 新实现类，不动管线） |
+| 数据保留期 / 调优参数 | env：`DATA_RETENTION_DAYS`、`RAG_*` 等 |
+
+**红线：代码里不得出现任何客户名称、客户专属分支、客户专属 if。**
+
+### 20.3 租户边界预留（migration 0005）
+
+核心表（telegram_updates、users、conversations、leads、knowledge_documents、integration_jobs、llm_providers、audit_logs）均含 `tenant_id BIGINT NOT NULL DEFAULT 1`；唯一约束已按租户作用域：`(tenant_id, telegram_user_id)`、one_open_conversation 含 tenant_id、one_active_provider = 每租户一个激活供应商。**独立实例阶段 tenant_id 恒为 1，查询不做租户过滤**——这是刻意的：单租户实例加租户过滤只增加出错面。
+
+### 20.4 SaaS 化转换清单（3–5 个付费客户后再做，现在不做）
+
+1. `telegram_updates` PK 改 `(tenant_id, update_id)`（不同 bot 的 update_id 可能撞）；
+2. 所有查询加租户过滤（repositories 层集中改），Redis 锁 / delivery_key / arq 任务参数加租户前缀；
+3. tenants 表 + bot token 按租户入库（Fernet 加密，复用 §12 机制）+ webhook 路由按 token 区分租户；
+4. 后台登录改多租户账号体系；备份/删除数据 API 按租户隔离；
+5. 数据合并：各客户库导入时 tenant_id 重编号。
+
+### 20.5 阶段闸门
+
+- 现在 → 3 个付费客户：只做定制交付，验证付费意愿与交付成本；
+- 3–5 个付费客户：若定制点收敛（配置面覆盖 ≥80% 需求）→ 启动 20.4；若发散 → 维持独立实例模式收服务费。

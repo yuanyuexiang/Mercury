@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     google_service_account_json: str = ""
     leads_spreadsheet_id: str = ""
 
+    # 客户实例定制（§20 产品化定制：20% 配置面）
+    brand_name: str = ""  # 品牌名，注入欢迎语与 RAG 提示词；空 = 通用称呼
+    bot_tone_hint: str = ""  # 回复语气提示，如 "Friendly and concise, use emojis sparingly"
+    scoring_overrides: str = ""  # 评分规则覆盖 JSON，见 domain/scoring.py config_from_json
+
     # 运行
     log_level: str = "INFO"
     data_retention_days: int = 180

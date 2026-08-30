@@ -85,6 +85,46 @@ def test_team_size_fits() -> None:
     assert not team_size_fits(None)
 
 
+def test_scoring_overrides_config() -> None:
+    """§20 产品化定制：分值/阈值/团队下限/免费域可按客户实例覆盖，未提供的键用默认。"""
+    from domain.scoring import config_from_json
+
+    cfg = config_from_json(
+        '{"points": {"asked_demo": 30}, "team_size_min": 5, "high_min": 55,'
+        ' "extra_free_domains": ["Example.com"]}'
+    )
+    assert cfg.points["asked_demo"] == 30
+    assert cfg.points["clear_need"] == 20  # 未覆盖的保持默认
+    assert cfg.team_size_min == 5 and cfg.high_min == 55 and cfg.medium_min == 30
+
+    # 覆盖后的行为：5 人团队计分、追加免费域被排除、55 分即 high
+    result = score_lead(
+        {"business_email": "a@example.com", "team_size": "5 people", "asked_demo": True},
+        config=cfg,
+    )
+    assert result.reasons == ["team_size_fit", "asked_demo"]  # example.com 被排除
+    assert result.score == 15 + 30 == 45
+    assert grade_of(55, cfg) == "high" and grade_of(54, cfg) == "medium"
+
+    # 空串 = 全默认；非法 JSON 直接抛错（宁可启动失败）
+    assert config_from_json("").points == config_from_json("  ").points
+    import json
+
+    import pytest
+
+    with pytest.raises(json.JSONDecodeError):
+        config_from_json("{not json")
+
+
+def test_branded_welcome() -> None:
+    """§20：品牌名注入欢迎语；未配置时用通用称呼。"""
+    from domain import texts
+
+    assert "Acme客服助手" in texts.welcome("Acme")
+    assert "我是客服助手" in texts.welcome("")
+    assert "/human" in texts.welcome("Acme")
+
+
 def test_validate_production_settings() -> None:
     """第三轮评审：生产（https）弱配置必须拒绝启动；开发环境不拦。"""
     import pytest

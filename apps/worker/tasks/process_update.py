@@ -19,6 +19,7 @@ async def process_update(ctx: dict[str, Any], update_id: int, trace_id: str | No
         ctx.get("brain"),
         update_id,
         reply_deadline_s=ctx["settings"].reply_deadline_s,
+        brand_name=ctx["settings"].brand_name,
     )
     if outcome == "locked":
         # 会话被占用：已回置 queued，延迟重入队（§6 第 1 步）；job_id 留空避免与在跑任务冲突

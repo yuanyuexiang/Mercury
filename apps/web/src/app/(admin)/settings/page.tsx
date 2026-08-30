@@ -1,12 +1,20 @@
 "use client";
-// 模型供应商配置（技术方案 §10/§12）：增删改、激活（热切换）、连接测试；key 脱敏展示。
+// 模型供应商：增删改、激活（热切换）、连接测试；key 加密存储、脱敏展示。
 import {
+  ApiOutlined,
+  CheckCircleFilled,
+  CloseCircleFilled,
+  PlusOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
+import {
+  App,
+  Badge,
   Button,
   Card,
   Checkbox,
   Form,
   Input,
-  message as antdMessage,
   Modal,
   Popconfirm,
   Space,
@@ -16,7 +24,9 @@ import {
 } from "antd";
 import { useCallback, useEffect, useState } from "react";
 
+import PageHeader from "@/components/PageHeader";
 import { api, ApiError } from "@/lib/api";
+import { fromNow } from "@/lib/ui";
 
 interface Provider {
   id: number;
@@ -33,6 +43,7 @@ interface Provider {
 }
 
 export default function SettingsPage() {
+  const { message } = App.useApp();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Provider | null>(null);
@@ -58,26 +69,26 @@ export default function SettingsPage() {
   const submit = async (values: Record<string, unknown>) => {
     try {
       if (editing) {
-        if (!values.api_key) delete values.api_key; // 不传保留原密文（§10）
+        if (!values.api_key) delete values.api_key; // 留空保留原密文
         await api.patch(`/api/settings/llm-providers/${editing.id}`, values);
       } else {
         await api.post("/api/settings/llm-providers", values);
       }
-      antdMessage.success("已保存");
+      message.success("已保存");
       setModalOpen(false);
       await load();
     } catch (e) {
-      antdMessage.error(e instanceof ApiError ? e.message : "保存失败");
+      message.error(e instanceof ApiError ? e.message : "保存失败");
     }
   };
 
   const activate = async (id: number) => {
     try {
       await api.post(`/api/settings/llm-providers/${id}/activate`);
-      antdMessage.success("已激活——worker 将即时切换，无需重启");
+      message.success("已激活，即时生效（无需重启）");
       await load();
     } catch (e) {
-      antdMessage.error(e instanceof ApiError ? e.message : "激活失败");
+      message.error(e instanceof ApiError ? e.message : "激活失败");
     }
   };
 
@@ -87,8 +98,8 @@ export default function SettingsPage() {
       const result = await api.post<{ ok: boolean; latency_ms: number; error: string | null }>(
         `/api/settings/llm-providers/${id}/test`,
       );
-      if (result.ok) antdMessage.success(`连接正常（${result.latency_ms}ms）`);
-      else antdMessage.error(`连接失败：${result.error}`);
+      if (result.ok) message.success(`连接正常，延迟 ${result.latency_ms}ms`);
+      else message.error(`连接失败：${result.error}`);
       await load();
     } finally {
       setTesting(null);
@@ -97,78 +108,110 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <Typography.Title level={4}>模型供应商</Typography.Title>
-      <Card
+      <PageHeader
+        title="模型配置"
+        subtitle="任意 OpenAI 兼容供应商；密钥加密存储；激活切换即时生效"
         extra={
-          <Button type="primary" onClick={() => openModal(null)}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => openModal(null)}>
             新增供应商
           </Button>
         }
-      >
-        <Typography.Paragraph type="secondary">
-          激活的供应商用于对话与 embedding（切换即时生效）。embedding 模型必须是 1536
-          维（如 text-embedding-3-small）；更换 embedding 模型后需对所有文档重建索引。
-        </Typography.Paragraph>
+      />
+      <Card styles={{ body: { paddingTop: 8 } }}>
         <Table<Provider>
           rowKey="id"
           dataSource={providers}
           pagination={false}
+          locale={{
+            emptyText: (
+              <div style={{ padding: "32px 0", textAlign: "center", color: "#94a3b8" }}>
+                <ApiOutlined style={{ fontSize: 32, marginBottom: 12, display: "block", margin: "0 auto 12px" }} />
+                还没有配置模型供应商——新增并激活后，机器人即可开始回答
+              </div>
+            ),
+          }}
           columns={[
             {
-              title: "名称",
+              title: "供应商",
+              width: 200,
               render: (_, p) => (
                 <Space>
-                  {p.name}
-                  {p.is_active && <Tag color="green">激活中</Tag>}
+                  {p.is_active ? <Badge status="processing" /> : <Badge status="default" />}
+                  <div style={{ lineHeight: 1.3 }}>
+                    <div style={{ fontWeight: 550 }}>
+                      {p.name}
+                      {p.is_active && (
+                        <Tag color="green" style={{ marginLeft: 8 }}>
+                          使用中
+                        </Tag>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#94a3b8" }}>{p.base_url}</div>
+                  </div>
                 </Space>
               ),
             },
-            { title: "Base URL", dataIndex: "base_url", ellipsis: true },
-            { title: "对话模型", dataIndex: "chat_model" },
+            { title: "对话模型", dataIndex: "chat_model", width: 160 },
             {
               title: "Embedding",
               dataIndex: "embed_model",
-              render: (v: string | null) => v ?? "（env 兜底）",
+              width: 180,
+              render: (v: string | null) =>
+                v ?? <span style={{ color: "#cbd5e1" }}>env 兜底</span>,
             },
-            { title: "API Key", dataIndex: "api_key_masked", width: 110 },
+            { title: "密钥", dataIndex: "api_key_masked", width: 90 },
             {
-              title: "连接测试",
-              width: 140,
+              title: "连接",
+              width: 130,
               render: (_, p) =>
-                p.last_test_at
-                  ? p.last_test_ok
-                    ? <Tag color="green">通过</Tag>
-                    : <Tag color="red">失败</Tag>
-                  : "-",
+                p.last_test_at ? (
+                  p.last_test_ok ? (
+                    <span style={{ color: "#52C41A", fontSize: 12.5 }}>
+                      <CheckCircleFilled /> 正常 · {fromNow(p.last_test_at)}
+                    </span>
+                  ) : (
+                    <span style={{ color: "#F5222D", fontSize: 12.5 }}>
+                      <CloseCircleFilled /> 失败 · {fromNow(p.last_test_at)}
+                    </span>
+                  )
+                ) : (
+                  <span style={{ color: "#cbd5e1", fontSize: 12.5 }}>未测试</span>
+                ),
             },
             {
               title: "操作",
-              width: 280,
+              width: 250,
               render: (_, p) => (
                 <Space>
                   {!p.is_active && (
-                    <Button size="small" type="primary" onClick={() => activate(p.id)}>
+                    <Button
+                      size="small"
+                      type="primary"
+                      ghost
+                      icon={<ThunderboltOutlined />}
+                      onClick={() => activate(p.id)}
+                    >
                       激活
                     </Button>
                   )}
                   <Button size="small" loading={testing === p.id} onClick={() => test(p.id)}>
                     测试
                   </Button>
-                  <Button size="small" onClick={() => openModal(p)}>
+                  <Button size="small" type="text" onClick={() => openModal(p)}>
                     编辑
                   </Button>
                   <Popconfirm
-                    title="确认删除？"
+                    title="确认删除该供应商？"
                     onConfirm={async () => {
                       try {
                         await api.del(`/api/settings/llm-providers/${p.id}`);
                         await load();
                       } catch (e) {
-                        antdMessage.error(e instanceof ApiError ? e.message : "删除失败");
+                        message.error(e instanceof ApiError ? e.message : "删除失败");
                       }
                     }}
                   >
-                    <Button size="small" danger disabled={p.is_active}>
+                    <Button size="small" type="text" danger disabled={p.is_active}>
                       删除
                     </Button>
                   </Popconfirm>
@@ -177,36 +220,50 @@ export default function SettingsPage() {
             },
           ]}
         />
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 4 }}>
+          Embedding 模型须为 1536 维（如 text-embedding-3-small）；更换 Embedding
+          模型后需在「知识库」对所有文档重建索引。
+        </Typography.Paragraph>
       </Card>
+
       <Modal
         title={editing ? `编辑：${editing.name}` : "新增供应商"}
         open={modalOpen}
         onCancel={() => setModalOpen(false)}
         onOk={() => form.submit()}
+        okText="保存"
       >
         <Form form={form} layout="vertical" onFinish={submit}>
-          <Form.Item name="name" label="名称" rules={[{ required: true }]}>
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
             <Input placeholder="如 DeepSeek 官方" />
           </Form.Item>
-          <Form.Item name="base_url" label="Base URL（OpenAI 兼容）" rules={[{ required: true }]}>
+          <Form.Item
+            name="base_url"
+            label="Base URL（OpenAI 兼容）"
+            rules={[{ required: true, message: "请输入 Base URL" }]}
+          >
             <Input placeholder="https://api.deepseek.com/v1" />
           </Form.Item>
           <Form.Item
             name="api_key"
             label={editing ? "API Key（留空保留原值）" : "API Key"}
-            rules={editing ? [] : [{ required: true }]}
+            rules={editing ? [] : [{ required: true, message: "请输入 API Key" }]}
           >
             <Input.Password placeholder="sk-…" />
           </Form.Item>
-          <Form.Item name="chat_model" label="对话模型" rules={[{ required: true }]}>
+          <Form.Item
+            name="chat_model"
+            label="对话模型"
+            rules={[{ required: true, message: "请输入模型名" }]}
+          >
             <Input placeholder="deepseek-chat" />
           </Form.Item>
           <Form.Item name="fallback_model" label="Fallback 模型（可选）">
-            <Input />
+            <Input placeholder="主模型连续失败时的备用" />
           </Form.Item>
           <Form.Item
             name="embed_model"
-            label="Embedding 模型（可选，必须 1536 维；留空用环境变量兜底）"
+            label="Embedding 模型（可选，须 1536 维；留空用环境变量兜底）"
           >
             <Input placeholder="text-embedding-3-small" />
           </Form.Item>

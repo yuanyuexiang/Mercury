@@ -39,6 +39,8 @@ class RagBrain:
             deadline,
             top_k=self._settings.rag_top_k,
             min_similarity=self._settings.rag_min_similarity,
+            brand_name=self._settings.brand_name,
+            tone_hint=self._settings.bot_tone_hint,
         )
 
 

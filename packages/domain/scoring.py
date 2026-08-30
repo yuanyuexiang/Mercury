@@ -1,15 +1,18 @@
 """线索评分：纯函数、表驱动规则（技术方案 §8）。
 
-LLM 只负责提取事实，评分完全确定性、可解释（§9.1）；
-命中的规则名存入 score_reasons，后台原样展示。
+LLM 只负责提取事实，评分完全确定性、可解释（§9.1）；命中的规则名存入 score_reasons。
+分值/阈值/团队规模下限/免费邮箱域可按客户实例配置（env `SCORING_OVERRIDES`，JSON），
+这是 §20 产品化定制路线的"20% 配置"之一——改配置不改代码。
 """
 
+import json
 import re
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
-# 免费邮箱域（§8）：可按客户配置扩展
+# 免费邮箱域（§8）：客户可经 extra_free_domains 追加
 FREE_EMAIL_DOMAINS = {
     "gmail.com",
     "googlemail.com",
@@ -32,11 +35,15 @@ FREE_EMAIL_DOMAINS = {
     "yandex.com",
 }
 
-# 团队规模达标下限（ICP：≥2 名客服/运营、月 300+ 咨询的团队，§8"达到目标客户标准"）
-TEAM_SIZE_FIT_MIN = 10
-
-GRADE_LOW_MAX = 29
-GRADE_MEDIUM_MAX = 59
+DEFAULT_POINTS: dict[str, int] = {
+    "company_email": 15,
+    "clear_need": 20,
+    "team_size_fit": 15,
+    "budget_given": 15,
+    "timeline_30d": 20,
+    "asked_demo": 25,
+    "freebie_only": -20,
+}
 
 # 30 天内采购的关键词/数字模式（确定性解析；不完美但可解释、可配置）
 _TIMELINE_KEYWORDS = (
@@ -62,11 +69,47 @@ _DAYS_RE = re.compile(r"(\d+)\s*(?:天|days?\b)", re.IGNORECASE)
 _WEEKS_RE = re.compile(r"(\d+)\s*(?:周|weeks?\b)", re.IGNORECASE)
 
 
-def is_business_email(email: str | None) -> bool:
+@dataclass(frozen=True)
+class ScoringConfig:
+    """按客户实例可覆盖的评分参数（SCORING_OVERRIDES，见 config_from_json）。"""
+
+    points: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_POINTS))
+    team_size_min: int = 10
+    medium_min: int = 30
+    high_min: int = 60
+    extra_free_domains: frozenset[str] = frozenset()
+
+
+@lru_cache(maxsize=8)
+def config_from_json(raw: str) -> ScoringConfig:
+    """解析 env 覆盖，如：
+    {"points": {"asked_demo": 30}, "team_size_min": 5, "high_min": 55,
+     "extra_free_domains": ["example.com"]}
+    未提供的键用默认值；解析失败抛错（宁可启动失败，不可静默用错规则）。
+    """
+    if not raw.strip():
+        return ScoringConfig()
+    data = json.loads(raw)
+    return ScoringConfig(
+        points={**DEFAULT_POINTS, **{k: int(v) for k, v in data.get("points", {}).items()}},
+        team_size_min=int(data.get("team_size_min", 10)),
+        medium_min=int(data.get("medium_min", 30)),
+        high_min=int(data.get("high_min", 60)),
+        extra_free_domains=frozenset(str(d).lower() for d in data.get("extra_free_domains", [])),
+    )
+
+
+def get_config() -> ScoringConfig:
+    from domain.config import get_settings
+
+    return config_from_json(get_settings().scoring_overrides)
+
+
+def is_business_email(email: str | None, extra_free_domains: frozenset[str] = frozenset()) -> bool:
     if not email or "@" not in email:
         return False
     domain = email.rsplit("@", 1)[1].strip().lower()
-    return bool(domain) and domain not in FREE_EMAIL_DOMAINS
+    return bool(domain) and domain not in FREE_EMAIL_DOMAINS and domain not in extra_free_domains
 
 
 def timeline_within_30d(text: str | None) -> bool:
@@ -84,23 +127,11 @@ def timeline_within_30d(text: str | None) -> bool:
     return False
 
 
-def team_size_fits(text: str | None) -> bool:
+def team_size_fits(text: str | None, minimum: int = 10) -> bool:
     if not text:
         return False
     match = re.search(r"\d+", text)
-    return match is not None and int(match.group()) >= TEAM_SIZE_FIT_MIN
-
-
-# (规则名, 分值, 命中判断)——§8 的表，规则名即 score_reasons 内容
-RULES: list[tuple[str, int, Callable[[dict[str, Any]], bool]]] = [
-    ("company_email", 15, lambda d: is_business_email(d.get("business_email"))),
-    ("clear_need", 20, lambda d: bool((d.get("requirement") or "").strip())),
-    ("team_size_fit", 15, lambda d: team_size_fits(d.get("team_size"))),
-    ("budget_given", 15, lambda d: bool((d.get("budget_range") or "").strip())),
-    ("timeline_30d", 20, lambda d: timeline_within_30d(d.get("purchase_timeline"))),
-    ("asked_demo", 25, lambda d: bool(d.get("asked_demo"))),
-    ("freebie_only", -20, lambda d: bool(d.get("freebie_only"))),
-]
+    return match is not None and int(match.group()) >= minimum
 
 
 @dataclass(frozen=True)
@@ -110,20 +141,27 @@ class ScoreResult:
     reasons: list[str]
 
 
-def grade_of(score: int) -> str:
-    if score <= GRADE_LOW_MAX:
+def grade_of(score: int, config: ScoringConfig | None = None) -> str:
+    cfg = config or ScoringConfig()
+    if score < cfg.medium_min:
         return "low"
-    if score <= GRADE_MEDIUM_MAX:
+    if score < cfg.high_min:
         return "medium"
     return "high"
 
 
-def score_lead(lead: dict[str, Any]) -> ScoreResult:
+def score_lead(lead: dict[str, Any], config: ScoringConfig | None = None) -> ScoreResult:
     """入参为 lead 字段字典（含 asked_demo/freebie_only 事实列）。"""
-    score = 0
-    reasons: list[str] = []
-    for name, points, predicate in RULES:
-        if predicate(lead):
-            score += points
-            reasons.append(name)
-    return ScoreResult(score=score, grade=grade_of(score), reasons=reasons)
+    cfg = config if config is not None else get_config()
+    hits: list[tuple[str, bool]] = [
+        ("company_email", is_business_email(lead.get("business_email"), cfg.extra_free_domains)),
+        ("clear_need", bool((lead.get("requirement") or "").strip())),
+        ("team_size_fit", team_size_fits(lead.get("team_size"), cfg.team_size_min)),
+        ("budget_given", bool((lead.get("budget_range") or "").strip())),
+        ("timeline_30d", timeline_within_30d(lead.get("purchase_timeline"))),
+        ("asked_demo", bool(lead.get("asked_demo"))),
+        ("freebie_only", bool(lead.get("freebie_only"))),
+    ]
+    score = sum(cfg.points.get(name, 0) for name, hit in hits if hit)
+    reasons = [name for name, hit in hits if hit]
+    return ScoreResult(score=score, grade=grade_of(score, cfg), reasons=reasons)

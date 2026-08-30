@@ -6,13 +6,13 @@ export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (pathname === "/") {
-    return NextResponse.redirect(new URL(authed ? "/conversations" : "/login", request.url));
+    return NextResponse.redirect(new URL(authed ? "/dashboard" : "/login", request.url));
   }
   if (!authed && pathname !== "/login") {
     return NextResponse.redirect(new URL("/login", request.url));
   }
   if (authed && pathname === "/login") {
-    return NextResponse.redirect(new URL("/conversations", request.url));
+    return NextResponse.redirect(new URL("/dashboard", request.url));
   }
   return NextResponse.next();
 }

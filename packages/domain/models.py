@@ -33,6 +33,8 @@ class TelegramUpdate(Base):
     __tablename__ = "telegram_updates"
 
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    # 租户边界（§20）：独立实例阶段恒为 1；SaaS 化时 PK 需改 (tenant_id, update_id)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     # queued|processing|replied|extracting|done|failed|skipped（§6 管线与兜底扫描器）
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'queued'"))
@@ -46,9 +48,13 @@ class TelegramUpdate(Base):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        Index("uq_users_tenant_telegram", "tenant_id", "telegram_user_id", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     username: Mapped[str | None] = mapped_column(Text)
     first_name: Mapped[str | None] = mapped_column(Text)
     last_name: Mapped[str | None] = mapped_column(Text)
@@ -75,6 +81,7 @@ class Conversation(Base):
         # 只约束"未关闭会话唯一"——/reset 关旧建新不会违反唯一键（§4）
         Index(
             "one_open_conversation",
+            "tenant_id",
             "telegram_chat_id",
             "user_id",
             unique=True,
@@ -83,6 +90,7 @@ class Conversation(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     telegram_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
@@ -151,6 +159,7 @@ class KnowledgeDocument(Base):
     __tablename__ = "knowledge_documents"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     title: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(Text, nullable=False)  # markdown|txt|pdf|url
     source_url: Mapped[str | None] = mapped_column(Text)
@@ -198,6 +207,7 @@ class Lead(Base):
     __tablename__ = "leads"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
@@ -276,6 +286,7 @@ class IntegrationJob(Base):
     __tablename__ = "integration_jobs"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     integration_type: Mapped[str] = mapped_column(Text, nullable=False)  # google_sheets|...
     entity_type: Mapped[str] = mapped_column(Text, nullable=False)  # lead
     entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -302,13 +313,14 @@ class LlmProvider(Base):
         # 全局至多一个激活供应商（§4）
         Index(
             "one_active_provider",
-            text("(true)"),
+            "tenant_id",
             unique=True,
             postgresql_where=text("is_active"),
         ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     api_key_enc: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet 密文，绝不存明文
@@ -334,6 +346,7 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     actor_type: Mapped[str] = mapped_column(Text, nullable=False)  # admin|system|ai
     actor_id: Mapped[str | None] = mapped_column(Text)
     action: Mapped[str] = mapped_column(Text, nullable=False)

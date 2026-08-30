@@ -1,22 +1,33 @@
 "use client";
-// 知识库（技术方案 §10）：上传/URL 导入、启停、重建索引、删除。
+// 知识库：拖拽上传 / URL 导入、启停、重建索引、删除；索引状态 5s 轮询。
 import {
+  FileMarkdownOutlined,
+  FilePdfOutlined,
+  FileTextOutlined,
+  InboxOutlined,
+  LinkOutlined,
+  SyncOutlined,
+} from "@ant-design/icons";
+import {
+  App,
   Button,
   Card,
+  Empty,
   Form,
   Input,
-  message as antdMessage,
   Modal,
   Popconfirm,
   Space,
+  Switch,
   Table,
   Tag,
-  Typography,
   Upload,
 } from "antd";
 import { useCallback, useEffect, useState } from "react";
 
+import PageHeader from "@/components/PageHeader";
 import { api, ApiError } from "@/lib/api";
+import { DOC_STATUS, fromNow } from "@/lib/ui";
 
 interface Doc {
   id: number;
@@ -28,15 +39,15 @@ interface Doc {
   updated_at: string;
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  active: "green",
-  indexing: "blue",
-  pending: "orange",
-  disabled: "default",
-  failed: "red",
+const TYPE_ICON: Record<string, React.ReactNode> = {
+  markdown: <FileMarkdownOutlined style={{ color: "#2F54EB" }} />,
+  txt: <FileTextOutlined style={{ color: "#64748b" }} />,
+  pdf: <FilePdfOutlined style={{ color: "#F5222D" }} />,
+  url: <LinkOutlined style={{ color: "#13C2C2" }} />,
 };
 
 export default function KnowledgePage() {
+  const { message } = App.useApp();
   const [docs, setDocs] = useState<Doc[]>([]);
   const [urlModalOpen, setUrlModalOpen] = useState(false);
   const [urlForm] = Form.useForm();
@@ -48,118 +59,143 @@ export default function KnowledgePage() {
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 5000); // 索引状态轮询
+    const timer = setInterval(load, 5000);
     return () => clearInterval(timer);
   }, [load]);
 
   const run = async (fn: () => Promise<unknown>, ok: string) => {
     try {
       await fn();
-      antdMessage.success(ok);
+      message.success(ok);
       await load();
     } catch (e) {
-      antdMessage.error(e instanceof ApiError ? e.message : "操作失败");
+      message.error(e instanceof ApiError ? e.message : "操作失败");
+      throw e;
     }
   };
 
   return (
     <div>
-      <Typography.Title level={4}>知识库</Typography.Title>
-      <Card>
-        <Space style={{ marginBottom: 16 }}>
-          <Upload
-            accept=".md,.markdown,.txt,.pdf"
-            showUploadList={false}
-            customRequest={({ file, onSuccess, onError }) => {
-              const formData = new FormData();
-              formData.append("file", file as File);
-              api
-                .upload("/api/knowledge/documents", formData)
-                .then(() => {
-                  antdMessage.success("已上传，索引中");
-                  load();
-                  onSuccess?.(null);
-                })
-                .catch((e) => {
-                  antdMessage.error(e instanceof ApiError ? e.message : "上传失败");
-                  onError?.(e);
-                });
-            }}
-          >
-            <Button type="primary">上传文档（md/txt/pdf）</Button>
-          </Upload>
-          <Button onClick={() => setUrlModalOpen(true)}>导入网页 URL</Button>
-        </Space>
+      <PageHeader
+        title="知识库"
+        subtitle="机器人只依据这里已启用的文档回答业务问题——资料越全，自动解决率越高"
+        extra={
+          <Button icon={<LinkOutlined />} onClick={() => setUrlModalOpen(true)}>
+            导入网页 URL
+          </Button>
+        }
+      />
+
+      <Upload.Dragger
+        accept=".md,.markdown,.txt,.pdf"
+        showUploadList={false}
+        multiple
+        style={{ marginBottom: 16 }}
+        customRequest={({ file, onSuccess, onError }) => {
+          const formData = new FormData();
+          formData.append("file", file as File);
+          api
+            .upload("/api/knowledge/documents", formData)
+            .then(() => {
+              message.success("已上传，开始索引");
+              load();
+              onSuccess?.(null);
+            })
+            .catch((e) => {
+              message.error(e instanceof ApiError ? e.message : "上传失败");
+              onError?.(e as Error);
+            });
+        }}
+      >
+        <p className="ant-upload-drag-icon">
+          <InboxOutlined />
+        </p>
+        <p className="ant-upload-text">点击或拖拽文件到此处上传</p>
+        <p className="ant-upload-hint">支持 Markdown / TXT / PDF，单文件不超过 20MB</p>
+      </Upload.Dragger>
+
+      <Card styles={{ body: { paddingTop: 8 } }}>
         <Table<Doc>
           rowKey="id"
           dataSource={docs}
           pagination={false}
+          locale={{
+            emptyText: (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="还没有文档——上传产品资料、FAQ、价格说明，机器人即可开始回答"
+              />
+            ),
+          }}
           columns={[
-            { title: "ID", dataIndex: "id", width: 60 },
-            { title: "标题", dataIndex: "title" },
-            { title: "类型", dataIndex: "source_type", width: 100 },
+            {
+              title: "文档",
+              render: (_, doc) => (
+                <Space>
+                  <span style={{ fontSize: 18 }}>{TYPE_ICON[doc.source_type]}</span>
+                  <div style={{ lineHeight: 1.3 }}>
+                    <div style={{ fontWeight: 550 }}>{doc.title}</div>
+                    {doc.source_url && (
+                      <div style={{ fontSize: 12, color: "#94a3b8" }}>{doc.source_url}</div>
+                    )}
+                  </div>
+                </Space>
+              ),
+            },
             {
               title: "状态",
               dataIndex: "status",
-              width: 100,
-              render: (s: string) => <Tag color={STATUS_COLORS[s]}>{s}</Tag>,
+              width: 110,
+              render: (s: string) => (
+                <Tag
+                  color={DOC_STATUS[s]?.color}
+                  icon={s === "indexing" ? <SyncOutlined spin /> : undefined}
+                >
+                  {DOC_STATUS[s]?.label ?? s}
+                </Tag>
+              ),
             },
-            { title: "版本", dataIndex: "version", width: 70 },
-            { title: "更新时间", dataIndex: "updated_at", width: 200 },
+            { title: "版本", dataIndex: "version", width: 70, render: (v: number) => `v${v}` },
+            { title: "更新时间", dataIndex: "updated_at", width: 120, render: fromNow },
+            {
+              title: "启用",
+              width: 80,
+              render: (_, doc) => (
+                <Switch
+                  size="small"
+                  checked={doc.status === "active"}
+                  disabled={doc.status === "indexing" || doc.status === "pending"}
+                  onChange={(checked) =>
+                    run(
+                      () =>
+                        api.patch(`/api/knowledge/documents/${doc.id}`, {
+                          status: checked ? "active" : "disabled",
+                        }),
+                      checked ? "已启用" : "已停用",
+                    )
+                  }
+                />
+              ),
+            },
             {
               title: "操作",
-              width: 260,
+              width: 170,
               render: (_, doc) => (
                 <Space>
-                  {doc.status === "active" ? (
-                    <Button
-                      size="small"
-                      onClick={() =>
-                        run(
-                          () =>
-                            api.patch(`/api/knowledge/documents/${doc.id}`, {
-                              status: "disabled",
-                            }),
-                          "已停用",
-                        )
-                      }
-                    >
-                      停用
-                    </Button>
-                  ) : (
-                    <Button
-                      size="small"
-                      onClick={() =>
-                        run(
-                          () =>
-                            api.patch(`/api/knowledge/documents/${doc.id}`, {
-                              status: "active",
-                            }),
-                          "已启用",
-                        )
-                      }
-                    >
-                      启用
-                    </Button>
-                  )}
                   <Button
                     size="small"
+                    type="text"
                     onClick={() =>
-                      run(
-                        () => api.post(`/api/knowledge/documents/${doc.id}/reindex`),
-                        "已加入索引队列",
-                      )
+                      run(() => api.post(`/api/knowledge/documents/${doc.id}/reindex`), "已加入索引队列")
                     }
                   >
                     重建索引
                   </Button>
                   <Popconfirm
-                    title="确认删除该文档及其全部索引？"
-                    onConfirm={() =>
-                      run(() => api.del(`/api/knowledge/documents/${doc.id}`), "已删除")
-                    }
+                    title="删除该文档及其全部索引与原始文件？"
+                    onConfirm={() => run(() => api.del(`/api/knowledge/documents/${doc.id}`), "已删除")}
                   >
-                    <Button size="small" danger>
+                    <Button size="small" type="text" danger>
                       删除
                     </Button>
                   </Popconfirm>
@@ -169,28 +205,35 @@ export default function KnowledgePage() {
           ]}
         />
       </Card>
+
       <Modal
         title="导入网页 URL"
         open={urlModalOpen}
         onCancel={() => setUrlModalOpen(false)}
         onOk={() => urlForm.submit()}
+        okText="导入"
       >
         <Form
           form={urlForm}
           layout="vertical"
           onFinish={(values) =>
-            run(() => api.post("/api/knowledge/documents/url", values), "已导入，索引中").then(
+            run(() => api.post("/api/knowledge/documents/url", values), "已导入，开始索引").then(
               () => {
                 setUrlModalOpen(false);
                 urlForm.resetFields();
               },
+              () => undefined,
             )
           }
         >
-          <Form.Item name="title" label="标题" rules={[{ required: true }]}>
-            <Input />
+          <Form.Item name="title" label="标题" rules={[{ required: true, message: "请输入标题" }]}>
+            <Input placeholder="如：产品定价说明" />
           </Form.Item>
-          <Form.Item name="url" label="URL" rules={[{ required: true, type: "url" }]}>
+          <Form.Item
+            name="url"
+            label="URL"
+            rules={[{ required: true, type: "url", message: "请输入合法的 http(s) 地址" }]}
+          >
             <Input placeholder="https://…" />
           </Form.Item>
         </Form>

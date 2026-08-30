@@ -111,7 +111,7 @@ async def upsert_user(session: AsyncSession, tg_user: dict[str, Any]) -> User:
             language_code=tg_user.get("language_code"),
         )
         .on_conflict_do_update(
-            index_elements=["telegram_user_id"],
+            index_elements=["tenant_id", "telegram_user_id"],
             set_={
                 "username": tg_user.get("username"),
                 "first_name": tg_user.get("first_name"),
@@ -147,7 +147,7 @@ async def get_or_create_open_conversation(
         pg_insert(Conversation)
         .values(telegram_chat_id=telegram_chat_id, user_id=user_id)
         .on_conflict_do_nothing(
-            index_elements=["telegram_chat_id", "user_id"],
+            index_elements=["tenant_id", "telegram_chat_id", "user_id"],
             index_where=text("status != 'closed'"),
         )
         .returning(Conversation)
