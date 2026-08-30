@@ -10,7 +10,7 @@ from domain.config import get_settings, validate_production_settings
 from fastapi import FastAPI
 from integrations.app_settings import AppSettingsStore
 from integrations.telegram import DynamicSender, probe_token, register_webhook
-from llm.client import OpenAIChatClient
+from llm.client import OpenAIChatClient, list_models
 from observability.logging import configure_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -53,6 +53,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 保存 token 时的验证与 webhook 注册（测试中可替换为 Fake）
     app.state.telegram_probe = probe_token
     app.state.telegram_register = register_webhook
+    # 供应商模型列表拉取（测试中可替换为 Fake）
+    app.state.list_models = list_models
     # 供应商连接测试用；测试中可替换为 Fake（§10 /test）
     app.state.chat_client_factory = lambda base_url, api_key, model: OpenAIChatClient(
         base_url=base_url, api_key=api_key, model=model

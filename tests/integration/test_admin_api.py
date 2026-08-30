@@ -70,6 +70,13 @@ async def client(session_factory, redis_client, settings, sender):
 
     app.state.telegram_probe = _fake_probe
     app.state.telegram_register = _fake_register
+
+    async def _fake_list_models(base_url: str, api_key: str) -> list[str]:
+        if api_key == "bad-key":
+            raise ConnectionError("unauthorized")
+        return ["deepseek-chat", "deepseek-reasoner"]
+
+    app.state.list_models = _fake_list_models
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
         http.app = app  # type: ignore[attr-defined]
@@ -580,3 +587,65 @@ async def test_telegram_candidates_from_webhook_traffic(client, session_factory)
     assert [i["chat_id"] for i in items] == [888, 777]  # 最新在前、同 chat 去重
     assert items[1]["kind"] == "私聊" and "Test" in items[1]["name"]
     assert items[1]["last_text"] == "第二条"
+
+
+async def test_fetch_provider_models(client, session_factory, monkeypatch) -> None:
+    """模型列表拉取：新建路径（base_url+key）、已存供应商路径（复用密文 key）、SSRF 拦截。"""
+    # mock DNS：域名解析成公网 IP；IP 字面量保持原样（127.0.0.1 必须仍被判定为内网）
+    monkeypatch.setattr(
+        "integrations.netguard.socket.getaddrinfo",
+        lambda host, *a, **k: [
+            (
+                2,
+                1,
+                6,
+                "",
+                (host if host.count(".") == 3 and host[0].isdigit() else "93.184.216.34", 0),
+            )
+        ],
+    )
+    await _login(client)
+
+    # 新建路径：base_url + api_key
+    resp = await client.post(
+        "/api/settings/llm-providers/models",
+        json={"base_url": "https://api.deepseek.com/v1", "api_key": "sk-x"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["items"] == ["deepseek-chat", "deepseek-reasoner"]
+
+    # key 无效 → 502 带友好提示
+    resp = await client.post(
+        "/api/settings/llm-providers/models",
+        json={"base_url": "https://api.deepseek.com/v1", "api_key": "bad-key"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 502
+
+    # SSRF：内网地址拒绝
+    resp = await client.post(
+        "/api/settings/llm-providers/models",
+        json={"base_url": "http://127.0.0.1/v1", "api_key": "sk-x"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 422
+
+    # 已存供应商路径：不传 key，用库里密文解出的 key
+    resp = await client.post(
+        "/api/settings/llm-providers",
+        json={
+            "name": "DeepSeek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "sk-stored",
+            "chat_model": "deepseek-chat",
+        },
+        headers=WRITE_HEADERS,
+    )
+    provider_id = resp.json()["id"]
+    resp = await client.post(
+        "/api/settings/llm-providers/models",
+        json={"provider_id": provider_id},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200 and len(resp.json()["items"]) == 2

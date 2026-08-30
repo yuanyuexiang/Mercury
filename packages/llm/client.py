@@ -240,3 +240,20 @@ def build_chat_client(settings: Settings) -> OpenAIChatClient | None:
             fallback_model=settings.llm_chat_model_fallback,
         )
     return None
+
+
+async def list_models(base_url: str, api_key: str, timeout_s: float = 10.0) -> list[str]:
+    """拉取 OpenAI 兼容接口的可用模型列表（GET /models）。
+
+    后台「模型配置」用：贴上 key 即可下拉选模型，不用查文档手填模型名。
+    """
+    import httpx
+
+    url = base_url.rstrip("/") + "/models"
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+        resp.raise_for_status()
+        data = resp.json()
+    items = data.get("data", []) if isinstance(data, dict) else []
+    ids = [m["id"] for m in items if isinstance(m, dict) and isinstance(m.get("id"), str)]
+    return sorted(ids)

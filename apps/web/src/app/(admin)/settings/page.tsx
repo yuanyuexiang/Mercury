@@ -9,6 +9,7 @@ import {
 } from "@ant-design/icons";
 import {
   App,
+  AutoComplete,
   Badge,
   Button,
   Card,
@@ -17,6 +18,7 @@ import {
   Input,
   Modal,
   Popconfirm,
+  Select,
   Space,
   Table,
   Tag,
@@ -26,6 +28,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import PageHeader from "@/components/PageHeader";
 import { api, ApiError } from "@/lib/api";
+import { PROVIDER_PRESETS, type ProviderPreset } from "@/lib/providers";
 import { fromNow } from "@/lib/ui";
 
 interface Provider {
@@ -110,7 +113,32 @@ export default function SettingsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Provider | null>(null);
   const [testing, setTesting] = useState<number | null>(null);
+  const [preset, setPreset] = useState<ProviderPreset | null>(null);
+  const [models, setModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
   const [form] = Form.useForm();
+
+  const fetchModels = async () => {
+    const base_url = form.getFieldValue("base_url");
+    const api_key = form.getFieldValue("api_key");
+    if (!base_url || (!api_key && !editing)) {
+      message.info("请先填写 Base URL 和 API Key");
+      return;
+    }
+    setFetchingModels(true);
+    try {
+      const body = editing
+        ? { provider_id: editing.id, api_key: api_key || undefined }
+        : { base_url, api_key };
+      const data = await api.post<{ items: string[] }>("/api/settings/llm-providers/models", body);
+      setModels(data.items);
+      message.success(`拉取到 ${data.items.length} 个模型，输入框已变为可搜索下拉`);
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "拉取失败");
+    } finally {
+      setFetchingModels(false);
+    }
+  };
 
   const load = useCallback(async () => {
     const data = await api.get<{ items: Provider[] }>("/api/settings/llm-providers");
@@ -123,6 +151,8 @@ export default function SettingsPage() {
 
   const openModal = (provider: Provider | null) => {
     setEditing(provider);
+    setPreset(null);
+    setModels([]);
     form.resetFields();
     if (provider) form.setFieldsValue({ ...provider, api_key: "" });
     setModalOpen(true);
@@ -298,6 +328,34 @@ export default function SettingsPage() {
         okText="保存"
       >
         <Form form={form} layout="vertical" onFinish={submit}>
+          {!editing && (
+            <Form.Item label="选择供应商（自动填好地址与推荐模型，只需再贴 API Key）">
+              <Select
+                placeholder="常见供应商模板；也可跳过全部手填"
+                options={PROVIDER_PRESETS.map((p, i) => ({ value: i, label: p.label }))}
+                onChange={(i: number) => {
+                  const p = PROVIDER_PRESETS[i];
+                  setPreset(p);
+                  setModels([]);
+                  form.setFieldsValue({
+                    name: p.label.split("（")[0],
+                    base_url: p.base_url,
+                    chat_model: p.chat_model,
+                    embed_model: p.embed_model,
+                    supports_json_schema: p.supports_json_schema,
+                  });
+                }}
+              />
+              {preset && (
+                <div style={{ fontSize: 12, color: "#64748b", marginTop: 6 }}>
+                  {preset.note} ·{" "}
+                  <a href={preset.keyUrl} target="_blank" rel="noreferrer">
+                    获取 API Key →
+                  </a>
+                </div>
+              )}
+            </Form.Item>
+          )}
           <Form.Item name="name" label="名称" rules={[{ required: true, message: "请输入名称" }]}>
             <Input placeholder="如 DeepSeek 官方" />
           </Form.Item>
@@ -317,19 +375,44 @@ export default function SettingsPage() {
           </Form.Item>
           <Form.Item
             name="chat_model"
-            label="对话模型"
+            label={
+              <Space size={8}>
+                对话模型
+                <Button size="small" type="link" loading={fetchingModels} onClick={fetchModels} style={{ padding: 0 }}>
+                  拉取模型列表
+                </Button>
+              </Space>
+            }
             rules={[{ required: true, message: "请输入模型名" }]}
           >
-            <Input placeholder="deepseek-chat" />
+            <AutoComplete
+              options={models.map((m) => ({ value: m }))}
+              placeholder="deepseek-chat（可先拉取列表再选择）"
+              filterOption={(input, option) =>
+                (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+              }
+            />
           </Form.Item>
           <Form.Item name="fallback_model" label="Fallback 模型（可选）">
-            <Input placeholder="主模型连续失败时的备用" />
+            <AutoComplete
+              options={models.map((m) => ({ value: m }))}
+              placeholder="主模型连续失败时的备用"
+              filterOption={(input, option) =>
+                (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+              }
+            />
           </Form.Item>
           <Form.Item
             name="embed_model"
             label="Embedding 模型（可选，须 1536 维；留空用环境变量兜底）"
           >
-            <Input placeholder="text-embedding-3-small" />
+            <AutoComplete
+              options={models.map((m) => ({ value: m }))}
+              placeholder="text-embedding-3-small"
+              filterOption={(input, option) =>
+                (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+              }
+            />
           </Form.Item>
           <Form.Item name="supports_json_schema" valuePropName="checked" initialValue={true}>
             <Checkbox>支持严格 JSON Schema（structured outputs）</Checkbox>

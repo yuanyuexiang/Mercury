@@ -556,6 +556,7 @@ ai_active ──user_request/sensitive/manual──▶ handoff_pending ──管
   - `GET /api/settings/llm-providers` → 列表（api_key 一律脱敏为末 4 位，写入后不可读回明文）；
   - `POST /api/settings/llm-providers` / `PATCH /{id}`（请求含新 key 才更新密文，否则保留）；
   - `POST /api/settings/llm-providers/{id}/activate` → 激活并 Redis 广播配置失效；
+  - `POST /api/settings/llm-providers/models` → 拉取供应商可用模型列表（GET {base_url}/models；已存供应商传 provider_id 复用密文 key，新建传 base_url+api_key；经 SSRF 校验）；前端配合内置供应商预设（`web/src/lib/providers.ts`：DeepSeek/OpenAI/OpenRouter/硅基流动/Kimi/GLM/通义，选择即自动填 base_url 与推荐模型）；
   - `POST /api/settings/llm-providers/{id}/test` → 最小对话调用，返回延迟/成败并回填 last_test_*；
   - `DELETE /api/settings/llm-providers/{id}`（激活中的不可删）。
   - 所有变更写 audit_logs（metadata 不含明文 key）。

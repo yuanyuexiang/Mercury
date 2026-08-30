@@ -66,6 +66,40 @@ def _check_base_url(request: Request, base_url: str) -> None:
     assert_public_http_url(base_url, allow_private=settings.allow_private_llm_base_url)
 
 
+class ModelsQuery(BaseModel):
+    """拉取模型列表：已存供应商传 provider_id（用库里密文 key）；新建未保存传 base_url+api_key。"""
+
+    provider_id: int | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+@router.post("/models", dependencies=AdminWrite)
+async def fetch_models(request: Request, body: ModelsQuery) -> dict[str, Any]:
+    settings = request.app.state.settings
+    if body.provider_id is not None:
+        async with request.app.state.session_factory() as session:
+            provider = await session.get(LlmProvider, body.provider_id)
+            if provider is None:
+                raise HTTPException(status_code=404)
+        base_url = provider.base_url
+        api_key = body.api_key or decrypt_api_key(settings, provider.api_key_enc)
+    else:
+        if not body.base_url or not body.api_key:
+            raise HTTPException(status_code=422, detail="请先填写 Base URL 和 API Key")
+        base_url = body.base_url
+        api_key = body.api_key
+    _check_base_url(request, base_url)
+    try:
+        models = await request.app.state.list_models(base_url, api_key)
+    except Exception as exc:
+        logger.warning("list_models_failed", base_url=base_url)
+        raise HTTPException(
+            status_code=502, detail="拉取失败：请检查 Base URL 与 API Key 是否正确"
+        ) from exc
+    return {"items": models}
+
+
 @router.post("", dependencies=AdminWrite)
 async def create_provider(request: Request, body: ProviderCreate) -> dict[str, Any]:
     _check_base_url(request, body.base_url)
