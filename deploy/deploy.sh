@@ -65,6 +65,9 @@ EOF
   echo "=================================================================="
 fi
 
+# 自愈①：旧版 .env 的通用主机名迁移为唯一别名（幂等；防与共享网络同名容器撞名）
+sed -i 's|@postgres:5432|@mercury-db:5432|; s|redis://redis:6379|redis://mercury-redis:6379|' .env
+
 # 绝不 source .env：bcrypt hash 以 $2b$ 开头，bash 会当位置参数展开（set -u 下直接退出）。
 # compose 用 --env-file 自行解析（dotenv 不做 shell 展开）；脚本只提取自己要用的值。
 env_get() { grep -E "^${1}=" .env | head -1 | cut -d'=' -f2-; }
@@ -77,6 +80,15 @@ COMPOSE=(docker compose --env-file .env -f compose.prod.yaml)
 echo "==> 部署 $TAG（当前运行：${PREV_TAG:-无记录}）"
 "${COMPOSE[@]}" pull --quiet
 "${COMPOSE[@]}" up -d --remove-orphans
+
+# 自愈②：postgres 内密码与 .env 强制一致（.env 曾重新生成而 volume 保留时会失配；
+# 容器内 socket 连接走 trust，无需旧密码即可重置）
+PG_SYNC_PASSWORD="$(env_get POSTGRES_PASSWORD)"
+if [ -n "$PG_SYNC_PASSWORD" ]; then
+  "${COMPOSE[@]}" exec -T postgres psql -qU mercury -d mercury \
+    -c "ALTER USER mercury PASSWORD '${PG_SYNC_PASSWORD}';" > /dev/null 2>&1 \
+    && echo "==> postgres 密码已与 .env 对齐" || true
+fi
 
 echo "==> 健康检查①：容器内应用就绪（不经 Traefik/DNS，只验应用本体）"
 READY=0
