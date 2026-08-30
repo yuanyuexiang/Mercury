@@ -34,8 +34,8 @@ TELEGRAM_WEBHOOK_SECRET=$(openssl rand -hex 32)
 OPERATOR_TELEGRAM_CHAT_ID=
 
 # 数据（容器内地址）
-DATABASE_URL=postgresql+asyncpg://mercury:${PG_PASSWORD}@postgres:5432/mercury
-REDIS_URL=redis://redis:6379/0
+DATABASE_URL=postgresql+asyncpg://mercury:${PG_PASSWORD}@mercury-db:5432/mercury
+REDIS_URL=redis://mercury-redis:6379/0
 
 # 后台（hash 单引号：防 compose dotenv 对 \$ 做插值）
 ADMIN_USERNAME=admin

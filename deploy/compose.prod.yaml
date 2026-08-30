@@ -70,7 +70,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
       POSTGRES_DB: ${POSTGRES_DB:-mercury}
     restart: unless-stopped
-    networks: [internal]
+    networks:
+      internal:
+        # 唯一别名：api 同时挂 Traefik 外部网络，那边可能存在共享容器就叫 postgres，
+        # 用通用名会被 Docker DNS 解析到别人的库（首次部署实测踩坑）
+        aliases: [mercury-db]
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -83,7 +87,9 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     restart: unless-stopped
-    networks: [internal]
+    networks:
+      internal:
+        aliases: [mercury-redis]  # 同上，防与外部网络同名容器撞名
     volumes:
       - redisdata:/data
     healthcheck:
