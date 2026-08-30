@@ -98,6 +98,31 @@ async def overview(request: Request, tz_offset_minutes: int = 0) -> dict[str, An
             .select_from(Lead)
             .where(Lead.created_at >= since, Lead.external_crm_id.is_not(None)),
         )
+        leads_won_window = await _count(
+            session,
+            select(func.count())
+            .select_from(Lead)
+            .where(Lead.created_at >= since, Lead.status == "won"),
+        )
+        # 渠道归因（窗口内）：/start 深链参数，NULL = 直接进入
+        channel_conv_rows = (
+            await session.execute(
+                select(Conversation.source_channel, func.count())
+                .where(Conversation.started_at >= since)
+                .group_by(Conversation.source_channel)
+            )
+        ).all()
+        channel_lead_rows = (
+            await session.execute(
+                select(
+                    Lead.source_channel,
+                    func.count(),
+                    func.count().filter(Lead.grade == "high"),
+                )
+                .where(Lead.created_at >= since)
+                .group_by(Lead.source_channel)
+            )
+        ).all()
         # 今日（前端本地时区口径）
         today_conversations = await _count(
             session,
@@ -129,6 +154,15 @@ async def overview(request: Request, tz_offset_minutes: int = 0) -> dict[str, An
                 .group_by("day")
             )
         ).all()
+    channels: dict[str | None, dict[str, int]] = {}
+    for channel, n in channel_conv_rows:
+        channels.setdefault(channel, {"conversations": 0, "leads": 0, "leads_high": 0})[
+            "conversations"
+        ] = int(n)
+    for channel, n, high in channel_lead_rows:
+        row = channels.setdefault(channel, {"conversations": 0, "leads": 0, "leads_high": 0})
+        row["leads"] = int(n)
+        row["leads_high"] = int(high)
     trend: dict[str, dict[str, int]] = {}
     for day, n in conv_rows:
         trend.setdefault(day.date().isoformat(), {"conversations": 0, "leads": 0})[
@@ -151,7 +185,14 @@ async def overview(request: Request, tz_offset_minutes: int = 0) -> dict[str, An
             "leads": leads_window,
             "leads_high": leads_high_window,
             "leads_synced": leads_synced_window,
+            "leads_won": leads_won_window,
         },
+        "channels": [
+            {"channel": channel, **counts}
+            for channel, counts in sorted(
+                channels.items(), key=lambda kv: kv[1]["conversations"], reverse=True
+            )
+        ],
         "today": {"conversations": today_conversations, "leads": today_leads},
         "trend": [
             {"day": day, **counts} for day, counts in sorted(trend.items(), key=lambda kv: kv[0])

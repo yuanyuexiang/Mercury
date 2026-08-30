@@ -122,6 +122,7 @@ async def get_conversation(request: Request, conversation_id: int) -> dict[str, 
             "status": conv.status,
             "telegram_chat_id": conv.telegram_chat_id,
             "assigned_operator_id": conv.assigned_operator_id,
+            "source_channel": conv.source_channel,
             "started_at": conv.started_at.isoformat(),
         },
         "user": {

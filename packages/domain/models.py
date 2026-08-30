@@ -91,6 +91,8 @@ class Conversation(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    # 渠道归因：/start 深链参数（t.me/<bot>?start=xxx），首触后不再覆盖
+    source_channel: Mapped[str | None] = mapped_column(Text)
     telegram_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
@@ -218,6 +220,8 @@ class Lead(Base):
         nullable=False,
         unique=True,
     )
+    # 渠道归因：创建时继承 conversation.source_channel
+    source_channel: Mapped[str | None] = mapped_column(Text)
     name: Mapped[str | None] = mapped_column(Text)
     company: Mapped[str | None] = mapped_column(Text)
     country: Mapped[str | None] = mapped_column(Text)

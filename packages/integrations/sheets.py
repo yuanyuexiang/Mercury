@@ -32,6 +32,7 @@ HEADERS = [
     "Summary",
     "Last Contact",
     "Synced At",
+    "Channel",
 ]
 
 # 与 HEADERS 一一对应的 canonical row 键（见 ports.py）
@@ -53,6 +54,7 @@ FIELD_KEYS = [
     "summary",
     "last_contact",
     "synced_at",
+    "source_channel",
 ]
 
 

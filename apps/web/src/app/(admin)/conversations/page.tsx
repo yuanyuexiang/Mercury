@@ -68,7 +68,12 @@ interface Msg {
 }
 
 interface Detail {
-  conversation: { id: number; status: string; telegram_chat_id: number };
+  conversation: {
+    id: number;
+    status: string;
+    telegram_chat_id: number;
+    source_channel: string | null;
+  };
   user: { username: string | null; first_name: string | null; telegram_user_id: number };
   lead: Record<string, unknown> | null;
   messages: Msg[];
@@ -606,6 +611,16 @@ export default function ConversationsWorkbench() {
             padding: 16,
           }}
         >
+          <div style={{ marginBottom: 12, fontSize: 12.5, color: "#64748b" }}>
+            来源渠道：
+            {conv!.source_channel ? (
+              <Tag color="geekblue" style={{ fontSize: 11.5 }}>
+                {conv!.source_channel}
+              </Tag>
+            ) : (
+              <span style={{ color: "#94a3b8" }}>直接进入</span>
+            )}
+          </div>
           <Typography.Text strong style={{ fontSize: 13 }}>
             线索评分
           </Typography.Text>

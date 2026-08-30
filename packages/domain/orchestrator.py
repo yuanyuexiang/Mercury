@@ -4,6 +4,7 @@
 domain 不 import aiogram/arq/redis/openai 实现。
 """
 
+import re
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from typing import Literal, Protocol
@@ -95,6 +96,27 @@ def _history_from_messages(messages: list[Message]) -> list[dict[str, str]]:
         role = "user" if m.direction == "inbound" else "assistant"
         history.append({"role": role, "content": m.content})
     return history
+
+
+_CHANNEL_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+async def _capture_start_channel(
+    session: AsyncSession, conversation: Conversation, stripped_text: str
+) -> None:
+    """渠道归因：/start <payload> 深链参数（t.me/<bot>?start=xxx）。
+
+    首触归因——已有渠道不覆盖；payload 是用户可控数据，仅接受 Telegram
+    深链合法字符集（字母数字_-，≤64），其余静默丢弃。
+    """
+    parts = stripped_text.split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    if not payload or conversation.source_channel is not None:
+        return
+    if not _CHANNEL_RE.fullmatch(payload):
+        return
+    conversation.source_channel = payload
+    await session.commit()
 
 
 def _route_command(
@@ -392,6 +414,8 @@ async def run_process_update(
                 else:
                     stripped = text_content.strip()
                     command = stripped.split()[0] if stripped.startswith("/") else None
+                    if command == "/start":
+                        await _capture_start_channel(session, conversation, stripped)
                     if command == "/human":
                         plan = await _handle_human_command(session, conversation, update_id)
                     else:
@@ -523,7 +547,9 @@ async def run_extract_lead(
                     await session.commit()
                     return "done", None
 
-                lead = await repositories.get_or_create_lead(session, user.id, conversation.id)
+                lead = await repositories.get_or_create_lead(
+                    session, user.id, conversation.id, conversation.source_channel
+                )
                 await session.commit()
                 current = repositories.lead_to_dict(lead)
                 old_grade = lead.grade
@@ -646,6 +672,7 @@ def _build_sync_row(
         "summary": summary,
         "last_contact": last_contact,
         "synced_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "source_channel": lead.source_channel,
     }
 
 

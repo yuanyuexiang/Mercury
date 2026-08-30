@@ -91,6 +91,7 @@ EXPORT_COLUMNS = (
     ("company", "公司"),
     ("business_email", "邮箱"),
     ("country", "国家"),
+    ("source_channel", "渠道"),
     ("requirement", "需求"),
     ("team_size", "团队规模"),
     ("budget_range", "预算"),

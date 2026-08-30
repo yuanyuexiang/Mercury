@@ -419,3 +419,32 @@ async def test_leads_filter_sort_export(client, session_factory) -> None:
     assert "attachment" in resp.headers["content-disposition"]
     assert resp.text.startswith("﻿")
     assert "Acme Corp" in resp.text and "Lead ID" in resp.text
+
+
+async def test_channel_attribution_in_metrics_and_export(client, session_factory) -> None:
+    """渠道归因闭环：overview.channels 聚合、funnel.leads_won、CSV 渠道列。"""
+    await _login(client)
+    async with session_factory() as session:
+        user = await repositories.upsert_user(session, {"id": 90021, "username": "chan"})
+        conv = await repositories.get_or_create_open_conversation(session, 90021, user.id)
+        conv.source_channel = "promo_yt"
+        session.add(
+            Lead(
+                conversation_id=conv.id,
+                user_id=user.id,
+                grade="high",
+                score=75,
+                status="won",
+                company="Won Co",
+                source_channel="promo_yt",
+            )
+        )
+        await session.commit()
+
+    data = (await client.get("/api/metrics/overview")).json()
+    assert data["funnel"]["leads_won"] == 1
+    row = next(c for c in data["channels"] if c["channel"] == "promo_yt")
+    assert row == {"channel": "promo_yt", "conversations": 1, "leads": 1, "leads_high": 1}
+
+    text = (await client.get("/api/leads/export")).text
+    assert "渠道" in text and "promo_yt" in text

@@ -153,3 +153,34 @@ async def test_ordering_guard_defers_newer_update(session_factory, locker, sende
     assert await run_process_update(session_factory, locker, sender, brain, 150) == "done"
     assert await run_process_update(session_factory, locker, sender, brain, 151) == "done"
     assert [t for _, t in sender.sent] == ["回答：第一条", "回答：第二条"]
+
+
+async def test_start_deep_link_channel_attribution(session_factory, locker, sender, brain) -> None:
+    """渠道归因：/start <payload> 首触记录；再次 /start 不覆盖；非法 payload 丢弃。"""
+    async with session_factory() as session:
+        await repositories.insert_update(session, 60, tg_update(60, "/start promo_yt"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 60)
+
+    async with session_factory() as session:
+        conv = (await session.execute(select(Conversation))).scalar_one()
+        assert conv.source_channel == "promo_yt"
+
+    # 首触归因：第二次 /start 带不同参数不覆盖
+    async with session_factory() as session:
+        await repositories.insert_update(session, 61, tg_update(61, "/start other_ch"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 61)
+    async with session_factory() as session:
+        conv = (await session.execute(select(Conversation))).scalar_one()
+        assert conv.source_channel == "promo_yt"
+
+
+async def test_start_channel_rejects_unsafe_payload(session_factory, locker, sender, brain) -> None:
+    async with session_factory() as session:
+        await repositories.insert_update(session, 62, tg_update(62, "/start 恶意 注入; drop"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 62)
+    async with session_factory() as session:
+        conv = (await session.execute(select(Conversation))).scalar_one()
+        assert conv.source_channel is None

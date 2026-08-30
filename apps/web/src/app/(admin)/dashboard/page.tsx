@@ -23,7 +23,19 @@ interface Overview {
   refused: number;
   leads_high: number;
   pending_handoffs: number;
-  funnel: { conversations: number; leads: number; leads_high: number; leads_synced: number };
+  funnel: {
+    conversations: number;
+    leads: number;
+    leads_high: number;
+    leads_synced: number;
+    leads_won: number;
+  };
+  channels: Array<{
+    channel: string | null;
+    conversations: number;
+    leads: number;
+    leads_high: number;
+  }>;
   today: { conversations: number; leads: number };
   trend: Array<{ day: string; conversations: number; leads: number }>;
 }
@@ -103,6 +115,7 @@ const FUNNEL_STAGES: Array<[keyof Overview["funnel"], string, string]> = [
   ["leads", "产生线索", "#722ED1"],
   ["leads_high", "高意向", "#F5222D"],
   ["leads_synced", "已同步 CRM", "#52C41A"],
+  ["leads_won", "已成交", "#237804"],
 ];
 
 function Funnel({ data }: { data: Overview["funnel"] }) {
@@ -338,6 +351,44 @@ export default function DashboardPage() {
                   </div>
                 );
               })
+            )}
+          </Card>
+          <Card
+            title="渠道来源"
+            extra={
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                深链 t.me/机器人?start=渠道名 自动归因
+              </Typography.Text>
+            }
+            style={{ marginTop: 16 }}
+          >
+            {(overview?.channels ?? []).length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />
+            ) : (
+              <Table
+                rowKey={(r) => r.channel ?? "__direct__"}
+                dataSource={overview?.channels ?? []}
+                size="small"
+                pagination={false}
+                columns={[
+                  {
+                    title: "渠道",
+                    dataIndex: "channel",
+                    render: (c: string | null) =>
+                      c ?? <span style={{ color: "#94a3b8" }}>直接进入</span>,
+                  },
+                  { title: "会话", dataIndex: "conversations", width: 70, align: "right" },
+                  { title: "线索", dataIndex: "leads", width: 70, align: "right" },
+                  {
+                    title: "高意向",
+                    dataIndex: "leads_high",
+                    width: 80,
+                    align: "right",
+                    render: (v: number) =>
+                      v > 0 ? <span style={{ color: "#F5222D", fontWeight: 600 }}>{v}</span> : v,
+                  },
+                ]}
+              />
             )}
           </Card>
         </Col>

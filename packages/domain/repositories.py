@@ -401,6 +401,7 @@ LEAD_SNAPSHOT_FIELDS = (
     "freebie_only",
     "score",
     "grade",
+    "source_channel",
 )
 
 
@@ -413,13 +414,18 @@ async def get_lead_by_conversation(session: AsyncSession, conversation_id: int) 
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def get_or_create_lead(session: AsyncSession, user_id: int, conversation_id: int) -> Lead:
+async def get_or_create_lead(
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    source_channel: str | None = None,
+) -> Lead:
     lead = await get_lead_by_conversation(session, conversation_id)
     if lead is not None:
         return lead
     stmt = (
         pg_insert(Lead)
-        .values(user_id=user_id, conversation_id=conversation_id)
+        .values(user_id=user_id, conversation_id=conversation_id, source_channel=source_channel)
         .on_conflict_do_nothing(index_elements=["conversation_id"])
         .returning(Lead)
     )
