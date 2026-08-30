@@ -78,29 +78,56 @@ echo "==> 部署 $TAG（当前运行：${PREV_TAG:-无记录}）"
 "${COMPOSE[@]}" pull --quiet
 "${COMPOSE[@]}" up -d --remove-orphans
 
-echo "==> 健康检查 ${PUBLIC_BASE_URL}/health/ready"
-if curl --fail --silent --retry 24 --retry-delay 5 --retry-all-errors \
-    "${PUBLIC_BASE_URL}/health/ready" > /dev/null; then
-  echo "$TAG" > "$PREV_FILE"
-  echo "==> 部署成功：$TAG"
-  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-    if curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-        -d "url=${PUBLIC_BASE_URL}/webhooks/telegram/${TELEGRAM_WEBHOOK_SECRET}" \
-        -d "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
-        -d 'allowed_updates=["message"]' > /dev/null; then
-      echo "==> Telegram webhook 已自动注册"
-    else
-      echo "==> ⚠️ webhook 注册失败，请检查 TELEGRAM_BOT_TOKEN" >&2
-    fi
-  else
-    echo "==> 提示：TELEGRAM_BOT_TOKEN 未配置，跳过 webhook（补配后重新部署即自动注册）"
+echo "==> 健康检查①：容器内应用就绪（不经 Traefik/DNS，只验应用本体）"
+READY=0
+for _ in $(seq 1 18); do
+  if "${COMPOSE[@]}" exec -T api python -c \
+      "import urllib.request as u,sys;sys.exit(0 if u.urlopen('http://localhost:8000/health/ready',timeout=5).status==200 else 1)" \
+      2>/dev/null; then
+    READY=1
+    break
   fi
-  exit 0
+  sleep 5
+done
+
+if [ "$READY" != "1" ]; then
+  echo "==> ❌ 应用未就绪，自动诊断：" >&2
+  echo "---- 容器状态 ----" >&2
+  "${COMPOSE[@]}" ps >&2 || true
+  echo "---- api 最近日志 ----" >&2
+  "${COMPOSE[@]}" logs --tail 15 api 2>&1 | tail -30 >&2 || true
+  echo "---- api 容器内实际连接串（脱敏） ----" >&2
+  "${COMPOSE[@]}" exec -T api python -c \
+    "import os,re;print('DATABASE_URL =',re.sub(r':[^:@/]+@',':***@',os.environ.get('DATABASE_URL','(未设置)')));print('REDIS_URL    =',os.environ.get('REDIS_URL','(未设置)'))" >&2 || true
+  if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$TAG" ]; then
+    echo "==> 自动回滚到 $PREV_TAG" >&2
+    IMAGE_TAG="$PREV_TAG" "${COMPOSE[@]}" up -d --remove-orphans
+  fi
+  exit 1
+fi
+echo "$TAG" > "$PREV_FILE"  # 应用本体健康即记录：.current_tag = 最后一个可用版本
+echo "==> 应用就绪：$TAG"
+
+echo "==> 健康检查②：公网入口 ${PUBLIC_BASE_URL}/health/ready"
+if curl --fail --silent --retry 12 --retry-delay 5 --retry-all-errors \
+    "${PUBLIC_BASE_URL}/health/ready" > /dev/null; then
+  echo "==> 公网可达，部署成功：$TAG"
+else
+  echo "==> ⚠️ 应用已就绪但公网访问失败——问题在 Traefik 路由/证书/DNS 层，回滚无益，不回滚。" >&2
+  echo "==> 排查：docker logs <traefik 容器>；确认 DNS 解析与 certresolver 配置。" >&2
+  exit 1
 fi
 
-echo "==> 健康检查失败！" >&2
-if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$TAG" ]; then
-  echo "==> 自动回滚到 $PREV_TAG" >&2
-  IMAGE_TAG="$PREV_TAG" "${COMPOSE[@]}" up -d --remove-orphans
+if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+  if curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+      -d "url=${PUBLIC_BASE_URL}/webhooks/telegram/${TELEGRAM_WEBHOOK_SECRET}" \
+      -d "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
+      -d 'allowed_updates=["message"]' > /dev/null; then
+    echo "==> Telegram webhook 已自动注册"
+  else
+    echo "==> ⚠️ webhook 注册失败，请检查 TELEGRAM_BOT_TOKEN" >&2
+  fi
+else
+  echo "==> 提示：TELEGRAM_BOT_TOKEN 未配置，跳过 webhook（补配后重新部署即自动注册）"
 fi
-exit 1
+exit 0
