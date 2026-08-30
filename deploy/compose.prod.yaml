@@ -27,11 +27,12 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=${TRAEFIK_NETWORK:?}
-      # entrypoint/certresolver 名称按服务器既有 Traefik 配置调整（§16）
+      # certresolver 按服务器既有 Traefik 配置（TRAEFIK_CERTRESOLVER，如 cloudflare/letsencrypt）
       - traefik.http.routers.mercury-api.rule=Host(`${PUBLIC_HOST:?}`) && (PathPrefix(`/api`) || PathPrefix(`/webhooks`) || PathPrefix(`/health`))
       - traefik.http.routers.mercury-api.priority=20
       - traefik.http.routers.mercury-api.entrypoints=websecure
-      - traefik.http.routers.mercury-api.tls.certresolver=letsencrypt
+      - traefik.http.routers.mercury-api.tls=true
+      - traefik.http.routers.mercury-api.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
       - traefik.http.services.mercury-api.loadbalancer.server.port=8000
 
   worker:
@@ -58,7 +59,8 @@ services:
       - traefik.http.routers.mercury-web.rule=Host(`${PUBLIC_HOST:?}`)
       - traefik.http.routers.mercury-web.priority=10
       - traefik.http.routers.mercury-web.entrypoints=websecure
-      - traefik.http.routers.mercury-web.tls.certresolver=letsencrypt
+      - traefik.http.routers.mercury-web.tls=true
+      - traefik.http.routers.mercury-web.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
       - traefik.http.services.mercury-web.loadbalancer.server.port=3000
 
   postgres:

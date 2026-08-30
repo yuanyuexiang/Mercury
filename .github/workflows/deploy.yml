@@ -1,10 +1,15 @@
-# 发布流水线（技术方案 §17）：buildx → GHCR（sha-*/latest）→ SSH 部署 → 健康检查（失败服务器端自动回滚）。
-# 回滚：workflow_dispatch 填某个历史 sha-* tag 重新部署。
+# 发布流水线（技术方案 §17，极简版）：push → 构建推 GHCR → 自动同步部署文件到服务器 →
+# 自动初始化 .env（首次）→ 拉起 → 健康检查（失败自动回滚）→ 自动注册 Telegram webhook。
+# 服务器无需任何预置（部署目录 ~/mercury 自动创建）。
+# 回滚：workflow_dispatch 填历史 sha-* tag。
+#
+# SSH 凭据当前放在 Repository Variables（测试期从简）；
+# ⚠️ 上生产前务必迁移到 Secrets 并更换私钥——Variables 对所有仓库读者明文可见。
 name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
     inputs:
       image_tag:
@@ -13,6 +18,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  DOMAIN: mercury.asksquirrel.ai
+  TRAEFIK_NETWORK: matrix-network
+  TRAEFIK_CERTRESOLVER: cloudflare
 
 jobs:
   build:
@@ -60,13 +68,34 @@ jobs:
     needs: [build]
     if: always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.image_tag != ''))
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
-      - name: SSH deploy（deploy.sh 自带健康检查与自动回滚）
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
+      - name: 同步部署文件到服务器（~/mercury 自动创建）
+        uses: appleboy/scp-action@v1
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          host: ${{ vars.SSH_HOST }}
+          username: ${{ vars.SSH_USER }}
+          key: ${{ vars.SSH_PRIVATE_KEY }}
+          source: deploy/compose.prod.yaml,deploy/deploy.sh
+          target: mercury/
+          strip_components: 1
+      - name: 部署（首次自动生成 .env；健康检查失败自动回滚；自动注册 webhook）
+        uses: appleboy/ssh-action@v1
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_OWNER: ${{ github.repository_owner }}
+          TAG: ${{ inputs.image_tag != '' && inputs.image_tag || needs.build.outputs.tag }}
+        with:
+          host: ${{ vars.SSH_HOST }}
+          username: ${{ vars.SSH_USER }}
+          key: ${{ vars.SSH_PRIVATE_KEY }}
+          envs: GHCR_TOKEN,GHCR_USER,GHCR_OWNER,TAG,DOMAIN,TRAEFIK_NETWORK,TRAEFIK_CERTRESOLVER
           script: |
-            cd /opt/mercury
-            ./deploy.sh "${{ inputs.image_tag != '' && inputs.image_tag || needs.build.outputs.tag }}"
+            set -e
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            cd ~/mercury
+            bash deploy.sh "$TAG"

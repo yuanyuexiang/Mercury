@@ -201,8 +201,13 @@ async def test_url_import_ssrf_blocked(client) -> None:
 
 
 async def test_provider_crud_activate_and_hot_reload(
-    client, session_factory, redis_client, settings
+    client, session_factory, redis_client, settings, monkeypatch
 ) -> None:
+    # mock DNS：开发机若开 fake-ip 代理，所有域名会解析进保留网段被 SSRF 校验误拦
+    monkeypatch.setattr(
+        "integrations.netguard.socket.getaddrinfo",
+        lambda host, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
     await _login(client)
     resp = await client.post(
         "/api/settings/llm-providers",

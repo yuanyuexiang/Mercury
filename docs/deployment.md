@@ -1,94 +1,56 @@
-# 部署手册
+# 部署手册（极简版）
 
-前提：一台已运行 Traefik 的服务器（Docker + Compose）、一个解析到该服务器的域名、GitHub 仓库。
-部署链路：push main → GitHub Actions 构建镜像推 GHCR → SSH 到服务器执行 `deploy.sh` → 健康检查（失败自动回滚上一版本）。
+目标环境已内置在 `deploy.yml` 顶部 env：域名 `mercury.asksquirrel.ai`、Traefik 网络
+`matrix-network`、证书 resolver `cloudflare`。换环境改那四行即可。
 
-## 一、本地准备密钥（一次性）
+部署链路：push（main/master）→ Actions 构建推 GHCR → **自动** scp 部署文件到服务器
+`~/mercury/` → **自动**首次生成 .env（随机密钥）→ 拉起 → 健康检查（失败自动回滚）
+→ **自动**注册 Telegram webhook。服务器上无需任何预置。
 
-```bash
-openssl rand -hex 32        # → TELEGRAM_WEBHOOK_SECRET（≥32 字符）
-openssl rand -hex 32        # → JWT_SECRET（≥32 字符）
-uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-                            # → SETTINGS_ENCRYPTION_KEY
-uv run python -c "import bcrypt; print(bcrypt.hashpw(b'你的后台密码', bcrypt.gensalt()).decode())"
-                            # → ADMIN_PASSWORD_HASH
-```
+## 一、前置（已完成的打勾）
 
-## 二、服务器初始化（一次性）
+- [x] DNS：`mercury.asksquirrel.ai` A → 54.70.201.189
+- [x] GitHub Repository Variables：`SSH_HOST` / `SSH_USER` / `SSH_PRIVATE_KEY`
+      （⚠️ 测试期从简放 Variables；上生产前迁 Secrets 并换私钥——Variables 明文可见）
+- [ ] push 代码到 main 或 master
 
-```bash
-sudo mkdir -p /opt/mercury && cd /opt/mercury
-# 从仓库拷贝两个文件：
-#   deploy/compose.prod.yaml → /opt/mercury/compose.prod.yaml
-#   deploy/deploy.sh         → /opt/mercury/deploy.sh   （chmod +x）
-docker network ls           # 确认既有 Traefik 的网络名 → TRAEFIK_NETWORK
-```
-
-创建 `/opt/mercury/.env`（参照仓库 `.env.example`），**生产必填**：
-
-| 变量 | 说明 |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | BotFather 创建 |
-| `TELEGRAM_WEBHOOK_SECRET` | 上面生成的 ≥32 字符 |
-| `OPERATOR_TELEGRAM_CHAT_ID` | 人工提醒接收者（自己私聊 bot 后从 getUpdates 拿，或群 ID） |
-| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_CHAT_MODEL` | **embedding 必须靠这里的 key**；对话模型也可稍后在后台配 |
-| `LLM_EMBED_MODEL` | 默认 text-embedding-3-small |
-| `SETTINGS_ENCRYPTION_KEY` | Fernet 主密钥 |
-| `DATABASE_URL` | **`postgresql+asyncpg://mercury:<POSTGRES_PASSWORD>@postgres:5432/mercury`**（容器内主机名是 `postgres:5432`，不是 localhost:55432！） |
-| `REDIS_URL` | `redis://redis:6379/0` |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` | 后台登录 |
-| `JWT_SECRET` | ≥32 字符 |
-| `PUBLIC_BASE_URL` | `https://你的域名` |
-| `PUBLIC_HOST` | `你的域名`（不带协议） |
-| `TRAEFIK_NETWORK` | 既有 Traefik 的 docker 网络名 |
-| `GHCR_OWNER` | GitHub 用户/组织名 |
-| `POSTGRES_PASSWORD` | 生产数据库密码 |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` / `LEADS_SPREADSHEET_ID` | Sheets 同步（可后补，配好后积压任务自动恢复） |
-
-注意：
-- `PUBLIC_BASE_URL` 为 https 时，应用启动会**强制校验**以上安全项，弱配置直接拒绝启动（这是特性不是 bug）。
-- `compose.prod.yaml` 中 Traefik labels 的 `entrypoints=websecure`、`certresolver=letsencrypt` 要与服务器既有 Traefik 配置一致，不一致就改 labels。
-- **GHCR 镜像默认 private**：要么首次构建后在 GitHub Packages 页面把两个镜像设为 public，要么服务器上 `docker login ghcr.io -u <用户名>`（PAT 需 `read:packages`）。
-
-## 三、GitHub 配置（一次性）
-
-仓库 Settings → Secrets and variables → Actions，新增三个 secrets：
-
-- `DEPLOY_HOST`：服务器 IP/域名
-- `DEPLOY_USER`：SSH 用户（须能执行 docker）
-- `DEPLOY_SSH_KEY`：SSH 私钥（对应公钥加入服务器 `~/.ssh/authorized_keys`）
-
-## 四、首次发布
+## 二、首次发布
 
 ```bash
-git push origin main    # 触发 Actions：构建 → 推 GHCR → SSH 部署 → 健康检查
+git push
 ```
 
-在 Actions 页面看 Deploy workflow 全绿即部署成功；`https://你的域名/health/ready` 应返回 `{"status":"ok"}`。
+看 Actions → Deploy 日志：首次部署会打印**后台初始密码（只显示一次，立即保存）**。
+完成后验证：`curl https://mercury.asksquirrel.ai/health/ready` → `{"status":"ok"}`，
+后台 `https://mercury.asksquirrel.ai/login`（用户名 admin）。
 
-## 五、部署后一次性动作
+## 三、补齐三个凭据（bot 与 LLM 生效的前提）
 
-1. **注册 Telegram webhook**（本地执行，环境变量用生产值）：
-   ```bash
-   TELEGRAM_BOT_TOKEN=... TELEGRAM_WEBHOOK_SECRET=... PUBLIC_BASE_URL=https://你的域名 \
-     uv run python scripts/set_webhook.py
-   ```
-2. 打开 `https://你的域名/login` 登录后台。
-3. 「知识库」上传产品文档，等状态变 `active`。
-4. 「模型配置」新增供应商 → 测试 → 激活（或直接用 .env 里的兜底配置）。
-5. Telegram 里给 bot 发消息，走一遍演示剧本（私有化部署 → HubSpot → 50 人价格 → 约 Demo），后台应出现 high 线索、Google Sheet 出现一行。
+SSH 到服务器编辑 `~/mercury/.env`，填三项：
 
-## 六、日常运维
+```dotenv
+TELEGRAM_BOT_TOKEN=        # BotFather /newbot（见附录 1）
+OPERATOR_TELEGRAM_CHAT_ID= # 人工提醒发到哪（见附录 2）
+LLM_API_KEY=               # OpenAI 兼容 key（LLM_CHAT_MODEL 默认 gpt-4o-mini，可改）
+```
+
+然后 Actions → Deploy → Run workflow 重新部署（镜像是私有的，拉取授权由 workflow 临时完成，所以统一走 Actions 触发）。
+重新部署会**自动注册 webhook**——之后 Telegram 里给 bot 发消息就通了。
+
+## 四、日常运维
 
 | 操作 | 方法 |
 |---|---|
-| 发新版 | 合并/推送到 main，自动发布 |
+| 发新版 | push 到 main/master，自动发布 |
 | 回滚 | Actions → Deploy → Run workflow → `image_tag` 填历史 `sha-*` |
-| 看日志 | 服务器 `docker compose -f compose.prod.yaml logs -f api worker` |
-| 手动部署 | 服务器 `./deploy.sh sha-xxxxxxx`（健康检查失败自动回滚） |
-| 备份 | backup 服务每日 `pg_dump` 到 `backups` volume，保留 14 份 |
+| 看日志 | 服务器 `cd ~/mercury && docker compose -f compose.prod.yaml logs -f api worker` |
+| 备份 | backup 服务每日 `pg_dump`，保留 14 份 |
 | 换模型/换 key | 后台「模型配置」，无需重启 |
+| 改域名/环境 | 改 `deploy.yml` 顶部 env 四行 + 服务器 `.env` 对应项 |
+| 后台改密码 | 生成新 hash 替换 `.env` 的 `ADMIN_PASSWORD_HASH` 后重新部署 |
 | 删用户数据 | `DELETE /api/users/by-telegram/{id}`（需登录 + CSRF 头） |
+
+上传知识库文档、配置/切换模型供应商都在后台页面完成（「知识库」/「模型配置」）。
 
 ## 附：Telegram 对接细节
 
