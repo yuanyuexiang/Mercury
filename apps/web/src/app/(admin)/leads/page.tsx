@@ -385,7 +385,7 @@ export default function LeadsWorkbench() {
                 )}
               </div>
               <Button size="small" icon={<CloudSyncOutlined />} onClick={manualSync}>
-                同步到 CRM
+                同步到表格
               </Button>
             </div>
 
@@ -414,7 +414,7 @@ export default function LeadsWorkbench() {
                   )}
                 </div>
                 <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 4 }}>
-                  CRM：{detail.external_crm_id ?? "未同步"} · v{detail.version} · 更新于{" "}
+                  表格：{detail.external_crm_id ? "已同步" : "未同步"} · v{detail.version} · 更新于{" "}
                   {fromNow(detail.updated_at)}
                 </div>
               </div>

@@ -51,6 +51,8 @@ interface SetupStatus {
   operator: boolean;
   llm: boolean;
   knowledge: boolean;
+  embedding_ready: boolean;
+  bot_username: string;
 }
 
 const SETUP_ITEMS: Array<[keyof SetupStatus, string, string]> = [
@@ -61,7 +63,7 @@ const SETUP_ITEMS: Array<[keyof SetupStatus, string, string]> = [
 ];
 
 function SetupCard({ status }: { status: SetupStatus }) {
-  const doneCount = SETUP_ITEMS.filter(([key]) => status[key]).length;
+  const doneCount = SETUP_ITEMS.filter(([key]) => status[key as keyof SetupStatus]).length;
   return (
     <Card
       style={{ marginBottom: 16, borderColor: "#ADC6FF", background: "#F0F5FF" }}
@@ -76,7 +78,9 @@ function SetupCard({ status }: { status: SetupStatus }) {
         </Typography.Text>
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: "10px 28px", marginTop: 12 }}>
-        {SETUP_ITEMS.map(([key, label, href], i) => (
+        {SETUP_ITEMS.map(([key, label, href], i) => {
+          const done = status[key as keyof SetupStatus] as boolean;
+          return (
           <Link
             key={key}
             href={href}
@@ -85,7 +89,7 @@ function SetupCard({ status }: { status: SetupStatus }) {
               alignItems: "center",
               gap: 8,
               fontSize: 13.5,
-              color: status[key] ? "#52C41A" : "#1e293b",
+              color: done ? "#52C41A" : "#1e293b",
               textDecoration: "none",
             }}
           >
@@ -99,18 +103,46 @@ function SetupCard({ status }: { status: SetupStatus }) {
                 justifyContent: "center",
                 fontSize: 12,
                 fontWeight: 600,
-                background: status[key] ? "#52C41A" : "#fff",
-                color: status[key] ? "#fff" : "#2F54EB",
-                border: status[key] ? "none" : "1.5px solid #2F54EB",
+                background: done ? "#52C41A" : "#fff",
+                color: done ? "#fff" : "#2F54EB",
+                border: done ? "none" : "1.5px solid #2F54EB",
               }}
             >
-              {status[key] ? "✓" : i + 1}
+              {done ? "✓" : i + 1}
             </span>
-            <span style={{ textDecoration: status[key] ? "line-through" : "none" }}>{label}</span>
-            {!status[key] && <RightOutlined style={{ fontSize: 10, color: "#94a3b8" }} />}
+            <span style={{ textDecoration: done ? "line-through" : "none" }}>{label}</span>
+            {!done && <RightOutlined style={{ fontSize: 10, color: "#94a3b8" }} />}
           </Link>
-        ))}
+          );
+        })}
       </div>
+      {!status.embedding_ready && status.llm && (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: "#D46B08" }}>
+          ⚠ 当前 AI 服务商没有配「知识库检索模型」，上传的文档将无法生效——
+          <Link href="/settings">去模型配置补上</Link>（最简单：加一个 OpenAI 服务商并填
+          text-embedding-3-small）
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function ReadyCard({ botUsername }: { botUsername: string }) {
+  return (
+    <Card
+      style={{ marginBottom: 16, borderColor: "#B7EB8F", background: "#F6FFED" }}
+      styles={{ body: { padding: "16px 20px" } }}
+    >
+      <Typography.Text strong style={{ fontSize: 15 }}>
+        🎉 全部就绪！
+      </Typography.Text>
+      <span style={{ fontSize: 13.5, marginLeft: 12 }}>
+        用手机 Telegram 打开{" "}
+        <a href={`https://t.me/${botUsername}`} target="_blank" rel="noreferrer">
+          @{botUsername}
+        </a>{" "}
+        给机器人发一句话（比如「你们的产品怎么收费？」），第一条会话就会出现在这里。
+      </span>
     </Card>
   );
 }
@@ -183,7 +215,7 @@ const FUNNEL_STAGES: Array<[keyof Overview["funnel"], string, string]> = [
   ["conversations", "会话", "#2F54EB"],
   ["leads", "产生线索", "#722ED1"],
   ["leads_high", "高意向", "#F5222D"],
-  ["leads_synced", "已同步 CRM", "#52C41A"],
+  ["leads_synced", "已同步表格", "#52C41A"],
   ["leads_won", "已成交", "#237804"],
 ];
 
@@ -304,7 +336,13 @@ export default function DashboardPage() {
   return (
     <div>
       <PageHeader title="概览" subtitle={`获客漏斗与近 ${overview?.window_days ?? 14} 天趋势`} />
-      {setup && Object.values(setup).some((v) => !v) && <SetupCard status={setup} />}
+      {setup && SETUP_ITEMS.some(([key]) => !setup[key as keyof SetupStatus]) && (
+        <SetupCard status={setup} />
+      )}
+      {setup &&
+        SETUP_ITEMS.every(([key]) => setup[key as keyof SetupStatus]) &&
+        setup.bot_username &&
+        overview?.funnel.conversations === 0 && <ReadyCard botUsername={setup.bot_username} />}
       <Row gutter={[16, 16]}>
         <Col xs={12} xl={6}>
           <BigStat
@@ -350,7 +388,7 @@ export default function DashboardPage() {
           <Card title={`转化漏斗（近 ${overview?.window_days ?? 14} 天）`}>
             {overview ? <Funnel data={overview.funnel} /> : null}
             <div style={{ marginTop: 14, fontSize: 12, color: "#94a3b8" }}>
-              AI 自动回复 {overview?.auto_replies ?? "—"} 条 · 安全拒答 {overview?.refused ?? "—"} 条
+              AI 自动回复 {overview?.auto_replies ?? "—"} 条 · 资料未覆盖转人工 {overview?.refused ?? "—"} 条
             </div>
           </Card>
           <Card title="每日 会话 / 新线索" style={{ marginTop: 16 }}>
@@ -429,7 +467,7 @@ export default function DashboardPage() {
             title="渠道来源"
             extra={
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                深链 t.me/机器人?start=渠道名 自动归因
+                不同推广位用不同链接（如 t.me/机器人?start=yt），自动统计各来源效果
               </Typography.Text>
             }
             style={{ marginTop: 16 }}

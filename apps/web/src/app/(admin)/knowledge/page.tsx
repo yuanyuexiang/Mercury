@@ -9,6 +9,7 @@ import {
   SyncOutlined,
 } from "@ant-design/icons";
 import {
+  Alert,
   App,
   Button,
   Card,
@@ -23,6 +24,7 @@ import {
   Tag,
   Upload,
 } from "antd";
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import PageHeader from "@/components/PageHeader";
@@ -50,7 +52,15 @@ export default function KnowledgePage() {
   const { message } = App.useApp();
   const [docs, setDocs] = useState<Doc[]>([]);
   const [urlModalOpen, setUrlModalOpen] = useState(false);
+  const [embeddingReady, setEmbeddingReady] = useState(true);
   const [urlForm] = Form.useForm();
+
+  useEffect(() => {
+    api
+      .get<{ embedding_ready: boolean }>("/api/settings/setup-status")
+      .then((d) => setEmbeddingReady(d.embedding_ready))
+      .catch(() => {});
+  }, []);
 
   const load = useCallback(async () => {
     const data = await api.get<{ items: Doc[] }>("/api/knowledge/documents");
@@ -85,6 +95,23 @@ export default function KnowledgePage() {
           </Button>
         }
       />
+
+      {!embeddingReady && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="知识库暂时无法生效：当前 AI 服务商缺少「知识库检索模型」"
+          description={
+            <span>
+              上传的文档会一直停在「待索引/索引失败」。请到
+              <Link href="/settings">「模型配置」</Link>
+              给当前服务商补一个知识库检索模型（最简单：新增 OpenAI 服务商并填
+              text-embedding-3-small），配好后点文档的「重建索引」即可恢复。
+            </span>
+          }
+        />
+      )}
 
       <Upload.Dragger
         accept=".md,.markdown,.txt,.pdf"

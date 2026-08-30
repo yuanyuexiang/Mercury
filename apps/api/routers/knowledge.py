@@ -62,7 +62,12 @@ async def upload_document(
     suffix = Path(file.filename).suffix.lower()
     source_type = SUFFIX_TO_TYPE.get(suffix)
     if source_type is None:
-        raise HTTPException(status_code=422, detail=f"不支持的文件类型：{suffix}")
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"暂不支持 {suffix} 文件：请用 Markdown / TXT / PDF（Word 文档可另存为 PDF 后上传）"
+            ),
+        )
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="文件超过 20MB 上限")

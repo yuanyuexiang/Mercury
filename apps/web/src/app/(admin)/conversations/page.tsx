@@ -166,7 +166,7 @@ function Bubble({ m, userName, userColor }: { m: Msg; userName: string; userColo
           {m.content}
         </div>
         <div style={{ marginTop: 4, textAlign: isUser ? "left" : "right" }}>
-          {m.answer_status === "refused" && <Tag color="warning">安全拒答</Tag>}
+          {m.answer_status === "refused" && <Tag color="warning">资料未覆盖</Tag>}
           {m.answer_status === "handoff" && <Tag color="orange">已转人工</Tag>}
           {m.delivery_status === "uncertain" && <Tag color="red">投递结果不明</Tag>}
           {m.delivery_status === "failed" && <Tag color="red">发送失败</Tag>}

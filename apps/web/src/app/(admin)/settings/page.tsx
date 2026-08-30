@@ -202,7 +202,7 @@ export default function SettingsPage() {
     <div>
       <PageHeader
         title="模型配置"
-        subtitle="任意 OpenAI 兼容供应商；密钥加密存储；激活切换即时生效"
+        subtitle="选择 AI 服务商、粘贴密钥并激活——机器人就用它来回答问题；随时切换、即时生效"
         extra={
           <Button type="primary" icon={<PlusOutlined />} onClick={() => openModal(null)}>
             新增供应商
@@ -245,11 +245,11 @@ export default function SettingsPage() {
             },
             { title: "对话模型", dataIndex: "chat_model", width: 160 },
             {
-              title: "Embedding",
+              title: "知识库检索模型",
               dataIndex: "embed_model",
               width: 180,
               render: (v: string | null) =>
-                v ?? <span style={{ color: "#cbd5e1" }}>env 兜底</span>,
+                v ?? <span style={{ color: "#cbd5e1" }}>未配置</span>,
             },
             { title: "密钥", dataIndex: "api_key_masked", width: 90 },
             {
@@ -393,7 +393,7 @@ export default function SettingsPage() {
               }
             />
           </Form.Item>
-          <Form.Item name="fallback_model" label="Fallback 模型（可选）">
+          <Form.Item name="fallback_model" label="备用模型（可选，主模型故障时顶上）">
             <AutoComplete
               options={models.map((m) => ({ value: m }))}
               placeholder="主模型连续失败时的备用"
@@ -404,7 +404,7 @@ export default function SettingsPage() {
           </Form.Item>
           <Form.Item
             name="embed_model"
-            label="Embedding 模型（可选，须 1536 维；留空用环境变量兜底）"
+            label="知识库检索模型（可选；机器人靠它搜索知识库，推荐 text-embedding-3-small）"
           >
             <AutoComplete
               options={models.map((m) => ({ value: m }))}
@@ -415,7 +415,7 @@ export default function SettingsPage() {
             />
           </Form.Item>
           <Form.Item name="supports_json_schema" valuePropName="checked" initialValue={true}>
-            <Checkbox>支持严格 JSON Schema（structured outputs）</Checkbox>
+            <Checkbox>支持结构化输出（选模板时已自动设置，不确定就保持默认）</Checkbox>
           </Form.Item>
         </Form>
       </Modal>

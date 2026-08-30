@@ -15,6 +15,7 @@ from integrations.app_settings import (
     KEY_BRAND_NAME,
     KEY_OPERATOR_CHAT_ID,
     KEY_TELEGRAM_BOT_TOKEN,
+    KEY_TELEGRAM_BOT_USERNAME,
     publish_invalidation,
 )
 from pydantic import BaseModel
@@ -44,6 +45,7 @@ async def get_telegram(request: Request) -> dict[str, Any]:
             KEY_TELEGRAM_BOT_TOKEN, settings.telegram_bot_token
         ),
         "operator_chat_id": await store.operator_chat_id(),
+        "bot_username": await store.get(KEY_TELEGRAM_BOT_USERNAME),
         "webhook_configured": bool(settings.public_base_url and settings.telegram_webhook_secret),
     }
 
@@ -70,6 +72,7 @@ async def put_telegram(request: Request, body: TelegramPut) -> dict[str, Any]:
                     status_code=422, detail="Bot Token 无效：Telegram 验证失败"
                 ) from exc
         values[KEY_TELEGRAM_BOT_TOKEN] = token
+        values[KEY_TELEGRAM_BOT_USERNAME] = bot_username if token else ""
 
     if body.operator_chat_id is not None:
         chat_id = body.operator_chat_id.strip()
@@ -134,16 +137,14 @@ async def test_telegram(request: Request) -> dict[str, Any]:
 
 
 @router.get("/setup-status", dependencies=AdminRead)
-async def setup_status(request: Request) -> dict[str, bool]:
+async def setup_status(request: Request) -> dict[str, Any]:
     """接入进度（快速开始清单用）：四项是否已配置，全 true = 可开门迎客。"""
     store = request.app.state.app_settings_store
     settings = request.app.state.settings
     async with request.app.state.session_factory() as session:
-        llm_db = (
-            await session.execute(
-                select(func.count()).select_from(LlmProvider).where(LlmProvider.is_active)
-            )
-        ).scalar() or 0
+        active_provider = (
+            await session.execute(select(LlmProvider).where(LlmProvider.is_active))
+        ).scalar_one_or_none()
         knowledge_active = (
             await session.execute(
                 select(func.count())
@@ -151,11 +152,19 @@ async def setup_status(request: Request) -> dict[str, bool]:
                 .where(KnowledgeDocument.status == "active")
             )
         ).scalar() or 0
+    # 知识库检索（embedding）可用性：激活供应商配了 embed_model，或 env 有兜底 key——
+    # 缺失时上传的文档无法索引，必须在界面上显式警告（小白陷阱）
+    embedding_ready = bool(
+        (active_provider is not None and active_provider.embed_model) or settings.llm_api_key
+    )
     return {
         "telegram": bool(await store.telegram_bot_token()),
         "operator": bool(await store.operator_chat_id()),
-        "llm": bool(llm_db) or bool(settings.llm_api_key and settings.llm_chat_model),
+        "llm": active_provider is not None
+        or bool(settings.llm_api_key and settings.llm_chat_model),
         "knowledge": knowledge_active > 0,
+        "embedding_ready": embedding_ready,
+        "bot_username": await store.get(KEY_TELEGRAM_BOT_USERNAME),
     }
 
 

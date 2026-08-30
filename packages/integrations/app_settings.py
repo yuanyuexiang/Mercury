@@ -25,6 +25,7 @@ CACHE_TTL_S = 60.0
 
 # 已知配置键（后台「系统设置」页的全集；DB 值为空串 = 未设置，回落 env）
 KEY_TELEGRAM_BOT_TOKEN = "telegram_bot_token"  # 加密存储
+KEY_TELEGRAM_BOT_USERNAME = "telegram_bot_username"  # 保存 token 时经 getMe 获得，引导页展示用
 KEY_OPERATOR_CHAT_ID = "operator_telegram_chat_id"
 KEY_BRAND_NAME = "brand_name"
 KEY_BOT_TONE_HINT = "bot_tone_hint"

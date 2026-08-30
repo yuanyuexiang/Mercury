@@ -547,7 +547,14 @@ async def test_setup_status_progression(client, session_factory) -> None:
     client.app.state.settings.llm_api_key = ""
     client.app.state.settings.llm_chat_model = ""
     status = (await client.get("/api/settings/setup-status")).json()
-    assert status == {"telegram": False, "operator": False, "llm": False, "knowledge": False}
+    assert status == {
+        "telegram": False,
+        "operator": False,
+        "llm": False,
+        "knowledge": False,
+        "embedding_ready": False,
+        "bot_username": "",
+    }
 
     # 配 telegram + operator（走后台 PUT）
     resp = await client.put(
@@ -567,7 +574,14 @@ async def test_setup_status_progression(client, session_factory) -> None:
         await session.commit()
 
     status = (await client.get("/api/settings/setup-status")).json()
-    assert status == {"telegram": True, "operator": True, "llm": True, "knowledge": True}
+    assert status == {
+        "telegram": True,
+        "operator": True,
+        "llm": True,
+        "knowledge": True,
+        "embedding_ready": True,  # env 兜底 key 已设，embedding 可用
+        "bot_username": "test_bot",  # 保存 token 时经 getMe 记录
+    }
     client.app.state.settings.llm_api_key = ""
     client.app.state.settings.llm_chat_model = ""
 
