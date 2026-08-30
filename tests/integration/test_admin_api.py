@@ -340,3 +340,82 @@ async def test_knowledge_delete_removes_file(client, session_factory, tmp_path) 
     assert stored.exists()  # noqa: ASYNC240
     await client.delete(f"/api/knowledge/documents/{doc_id}", headers=WRITE_HEADERS)
     assert not stored.exists()  # noqa: ASYNC240
+
+
+async def test_meta_brand_public(client) -> None:
+    """品牌白标（§20）：/api/meta 免认证，只暴露品牌名。"""
+    resp = await client.get("/api/meta")
+    assert resp.status_code == 200
+    assert resp.json() == {"brand_name": ""}
+    client.app.state.settings.brand_name = "Acme"
+    assert (await client.get("/api/meta")).json()["brand_name"] == "Acme"
+
+
+async def _seed_lead(
+    session_factory, tg_id: int, *, grade: str, score: int, status: str = "open", **fields
+) -> None:
+    async with session_factory() as session:
+        user = await repositories.upsert_user(session, {"id": tg_id, "username": f"u{tg_id}"})
+        conv = await repositories.get_or_create_open_conversation(session, tg_id, user.id)
+        session.add(
+            Lead(
+                conversation_id=conv.id,
+                user_id=user.id,
+                grade=grade,
+                score=score,
+                status=status,
+                **fields,
+            )
+        )
+        await session.commit()
+
+
+async def test_metrics_overview_funnel_pending_trend(client, session_factory) -> None:
+    """概览驾驶舱：漏斗/今日/趋势/待接管字段齐全且计数正确。"""
+    await _login(client)
+    await _seed_lead(session_factory, 90001, grade="high", score=80, external_crm_id="sheets:2")
+    async with session_factory() as session:
+        user = await repositories.upsert_user(session, {"id": 90002, "username": "pend"})
+        conv = await repositories.get_or_create_open_conversation(session, 90002, user.id)
+        conv.status = "handoff_pending"
+        await session.commit()
+
+    data = (await client.get("/api/metrics/overview?tz_offset_minutes=480")).json()
+    assert data["pending_handoffs"] == 1
+    assert data["funnel"]["conversations"] == 2
+    assert data["funnel"]["leads"] == 1
+    assert data["funnel"]["leads_high"] == 1
+    assert data["funnel"]["leads_synced"] == 1
+    assert data["today"] == {"conversations": 2, "leads": 1}
+    assert sum(d["conversations"] for d in data["trend"]) == 2
+    assert sum(d["leads"] for d in data["trend"]) == 1
+
+    assert (await client.get("/api/metrics/pending")).json() == {"pending_handoffs": 1}
+
+
+async def test_leads_filter_sort_export(client, session_factory) -> None:
+    """线索 mini-CRM：状态筛选、recent 排序、CSV 导出（含 BOM、中文表头）。"""
+    await _login(client)
+    await _seed_lead(
+        session_factory,
+        90011,
+        grade="high",
+        score=75,
+        status="synced",
+        company="Acme Corp",
+        external_crm_id="sheets:5",
+    )
+    await _seed_lead(session_factory, 90012, grade="low", score=0)
+
+    items = (await client.get("/api/leads?status=synced")).json()["items"]
+    assert [i["company"] for i in items] == ["Acme Corp"]
+
+    items = (await client.get("/api/leads?grade=high&sort=recent")).json()["items"]
+    assert items and all(i["grade"] == "high" for i in items)
+
+    resp = await client.get("/api/leads/export?grade=high")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/csv")
+    assert "attachment" in resp.headers["content-disposition"]
+    assert resp.text.startswith("﻿")
+    assert "Acme Corp" in resp.text and "Lead ID" in resp.text

@@ -42,6 +42,68 @@ interface Provider {
   last_test_ok: boolean | null;
 }
 
+interface CostRow {
+  day: string;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  calls: number;
+}
+
+function UsageCard() {
+  const [costs, setCosts] = useState<CostRow[]>([]);
+
+  useEffect(() => {
+    api.get<{ items: CostRow[] }>("/api/metrics/costs").then((d) => setCosts(d.items));
+  }, []);
+
+  const byDay = new Map<string, number>();
+  for (const row of costs) {
+    byDay.set(row.day, (byDay.get(row.day) ?? 0) + row.prompt_tokens + row.completion_tokens);
+  }
+  const days = [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-14);
+  const maxTokens = Math.max(1, ...days.map(([, v]) => v));
+
+  return (
+    <Card
+      title="模型用量（Token / 日，近 14 天）"
+      style={{ marginTop: 16 }}
+      styles={{ body: { paddingTop: 12 } }}
+    >
+      {days.length === 0 ? (
+        <Typography.Text type="secondary">暂无调用记录</Typography.Text>
+      ) : (
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 120 }}>
+          {days.map(([day, tokens]) => (
+            <div
+              key={day}
+              title={`${day}：${tokens.toLocaleString()} tokens`}
+              style={{
+                flex: 1,
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "flex-end",
+                height: "100%",
+              }}
+            >
+              <div
+                style={{
+                  height: `${Math.max(6, (tokens / maxTokens) * 100)}%`,
+                  background: "linear-gradient(180deg,#597EF7,#2F54EB)",
+                  borderRadius: 4,
+                }}
+              />
+              <div style={{ fontSize: 10, color: "#94a3b8", textAlign: "center", marginTop: 4 }}>
+                {day.slice(5)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export default function SettingsPage() {
   const { message } = App.useApp();
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -225,6 +287,8 @@ export default function SettingsPage() {
           模型后需在「知识库」对所有文档重建索引。
         </Typography.Paragraph>
       </Card>
+
+      <UsageCard />
 
       <Modal
         title={editing ? `编辑：${editing.name}` : "新增供应商"}

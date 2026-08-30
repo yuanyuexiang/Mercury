@@ -535,10 +535,14 @@ ai_active ──user_request/sensitive/manual──▶ handoff_pending ──管
 - `GET /api/conversations?status=&q=&page=` → 分页列表（最后消息摘要、lead grade）。
 - `GET /api/conversations/{id}` → 消息流（含 `source_chunk_ids` 展开的来源片段）、lead 面板、handoff 历史。
 - `POST /api/conversations/{id}/handoff` / `resume-ai` → 状态机 transition。
+- `GET /api/leads?grade=&status=&sort=&page=` → 分页列表（`sort=recent` 按更新时间，默认按分数）。
+- `GET /api/leads/export?grade=&status=` → CSV 导出（中文表头 + BOM，上限 5000 行）。
 - `PATCH /api/leads/{id}` → 人工修正字段后自动重算评分。
 - `POST /api/leads/{id}/sync` → 手动重试同步。
 - `POST /api/knowledge/documents`（multipart 上传或 `{url}`）→ 建记录 + enqueue `index_document`。
-- `GET /api/metrics/overview` → 消息数/会话数/自动回复数/接管数/线索数（按日聚合）。
+- `GET /api/meta`（**免认证**）→ `{brand_name}`，登录页/侧边栏品牌白标用（§20），禁止暴露其他配置。
+- `GET /api/metrics/overview?tz_offset_minutes=` → 窗口统计 + `funnel`（会话→线索→高意向→已同步）+ `today`（按前端时区）+ `trend`（14 天按日会话/线索）+ `pending_handoffs`。
+- `GET /api/metrics/pending` → `{pending_handoffs}`（侧边栏 badge 30s 轮询，保持轻量）。
 - `GET /api/metrics/costs` → 按日 token 与估算成本。
 - `GET /api/metrics/knowledge-gaps` → `answer_status='refused'` 的问题聚合列表。
 - 模型供应商配置：

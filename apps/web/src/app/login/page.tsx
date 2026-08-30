@@ -3,14 +3,23 @@
 import { LockOutlined, UserOutlined } from "@ant-design/icons";
 import { Alert, Button, Form, Input, Typography } from "antd";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
+import { brandTitle, fetchBrandName } from "@/lib/brand";
 
 export default function LoginPage() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [brand, setBrand] = useState("");
+
+  useEffect(() => {
+    fetchBrandName().then((b) => {
+      setBrand(b);
+      document.title = `${brandTitle(b)} · 登录`;
+    });
+  }, []);
 
   const onFinish = async (values: { username: string; password: string }) => {
     setLoading(true);
@@ -55,13 +64,13 @@ export default function LoginPage() {
               boxShadow: "0 8px 24px rgba(47,84,235,0.35)",
             }}
           >
-            M
+            {brandTitle(brand).charAt(0).toUpperCase()}
           </div>
           <Typography.Title level={3} style={{ color: "#fff", margin: 0 }}>
-            Mercury
+            {brandTitle(brand)}
           </Typography.Title>
           <Typography.Text style={{ color: "rgba(255,255,255,0.65)" }}>
-            Telegram 询盘自动转化系统
+            询盘自动转化系统
           </Typography.Text>
         </div>
 
@@ -93,7 +102,7 @@ export default function LoginPage() {
         <Typography.Paragraph
           style={{ textAlign: "center", color: "rgba(255,255,255,0.4)", marginTop: 20, fontSize: 12 }}
         >
-          Turn Telegram conversations into qualified sales leads
+          {brand ? "Powered by Mercury" : "Turn conversations into qualified sales leads"}
         </Typography.Paragraph>
       </div>
     </main>

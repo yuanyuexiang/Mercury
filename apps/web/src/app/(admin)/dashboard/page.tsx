@@ -1,31 +1,31 @@
 "use client";
-// 概览：图标统计卡 + Token 用量迷你图 + 知识库缺口。
+// 概览 = 获客驾驶舱：今日大数字 → 转化漏斗 → 趋势 → 最新高意向 → 知识库缺口。
+// token 用量图在「模型配置」页（成本视角，不属于获客叙事）。
 import {
   FireOutlined,
   FunnelPlotOutlined,
   MessageOutlined,
-  RobotOutlined,
-  StopOutlined,
-  TeamOutlined,
+  RightOutlined,
   UserSwitchOutlined,
 } from "@ant-design/icons";
-import { Card, Col, Empty, Row, Table, Tooltip, Typography } from "antd";
+import { Card, Col, Empty, Row, Table, Typography } from "antd";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import PageHeader from "@/components/PageHeader";
 import { api } from "@/lib/api";
-import { fromNow } from "@/lib/ui";
+import { avatarColor, fromNow, initialOf, SCORE_REASON } from "@/lib/ui";
 
 interface Overview {
   window_days: number;
-  messages: number;
-  conversations: number;
   auto_replies: number;
   refused: number;
-  handoffs: number;
-  leads_total: number;
   leads_high: number;
+  pending_handoffs: number;
+  funnel: { conversations: number; leads: number; leads_high: number; leads_synced: number };
+  today: { conversations: number; leads: number };
+  trend: Array<{ day: string; conversations: number; leads: number }>;
 }
 
 interface Gap {
@@ -34,37 +34,51 @@ interface Gap {
   refused_at: string;
 }
 
-interface CostRow {
-  day: string;
-  model: string;
-  prompt_tokens: number;
-  completion_tokens: number;
-  calls: number;
+interface HotLead {
+  id: number;
+  company: string | null;
+  name: string | null;
+  score: number;
+  grade: string;
+  score_reasons: string[];
+  requirement: string | null;
+  updated_at: string;
+  user: { username: string | null; telegram_user_id: number } | null;
 }
 
-function StatCard({
+function BigStat({
   icon,
   color,
   title,
   value,
+  href,
+  alert,
 }: {
   icon: React.ReactNode;
   color: string;
   title: string;
   value: number | undefined;
+  href?: string;
+  alert?: boolean;
 }) {
+  const router = useRouter();
   return (
-    <Card styles={{ body: { padding: "18px 20px" } }}>
+    <Card
+      hoverable={!!href}
+      onClick={href ? () => router.push(href) : undefined}
+      styles={{ body: { padding: "18px 20px" } }}
+      style={alert ? { borderColor: "#FF4D4F", background: "#FFF1F0" } : undefined}
+    >
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
         <div
           style={{
-            width: 42,
-            height: 42,
-            borderRadius: 11,
+            width: 44,
+            height: 44,
+            borderRadius: 12,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            fontSize: 19,
+            fontSize: 20,
             color,
             background: `${color}14`,
             flexShrink: 0,
@@ -72,116 +86,292 @@ function StatCard({
         >
           {icon}
         </div>
-        <div style={{ lineHeight: 1.25 }}>
-          <div style={{ fontSize: 24, fontWeight: 700, color: "#0f172a" }}>{value ?? "—"}</div>
+        <div style={{ lineHeight: 1.25, flex: 1 }}>
+          <div style={{ fontSize: 26, fontWeight: 700, color: alert ? "#CF1322" : "#0f172a" }}>
+            {value ?? "—"}
+          </div>
           <div style={{ fontSize: 12.5, color: "#64748b" }}>{title}</div>
         </div>
+        {href && <RightOutlined style={{ color: "#cbd5e1", fontSize: 12 }} />}
       </div>
     </Card>
   );
 }
 
+const FUNNEL_STAGES: Array<[keyof Overview["funnel"], string, string]> = [
+  ["conversations", "会话", "#2F54EB"],
+  ["leads", "产生线索", "#722ED1"],
+  ["leads_high", "高意向", "#F5222D"],
+  ["leads_synced", "已同步 CRM", "#52C41A"],
+];
+
+function Funnel({ data }: { data: Overview["funnel"] }) {
+  const base = Math.max(1, data.conversations);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {FUNNEL_STAGES.map(([key, label, color], i) => {
+        const value = data[key];
+        const prev = i === 0 ? null : data[FUNNEL_STAGES[i - 1][0]];
+        const rate = prev ? (prev > 0 ? Math.round((value / prev) * 100) : 0) : null;
+        return (
+          <div key={key} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 84, fontSize: 12.5, color: "#64748b", textAlign: "right" }}>
+              {label}
+            </div>
+            <div style={{ flex: 1, background: "#f1f5f9", borderRadius: 6, height: 26 }}>
+              <div
+                style={{
+                  width: `${Math.max(3, (value / base) * 100)}%`,
+                  height: "100%",
+                  borderRadius: 6,
+                  background: color,
+                  opacity: 0.85,
+                  display: "flex",
+                  alignItems: "center",
+                  paddingLeft: 10,
+                  color: "#fff",
+                  fontSize: 12.5,
+                  fontWeight: 600,
+                  minWidth: 30,
+                }}
+              >
+                {value}
+              </div>
+            </div>
+            <div style={{ width: 52, fontSize: 11.5, color: "#94a3b8" }}>
+              {rate !== null ? `${rate}%` : ""}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Trend({ data }: { data: Overview["trend"] }) {
+  const days = data.slice(-14);
+  const max = Math.max(1, ...days.map((d) => Math.max(d.conversations, d.leads)));
+  if (days.length === 0)
+    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />;
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 110 }}>
+        {days.map((d) => (
+          <div
+            key={d.day}
+            title={`${d.day}：${d.conversations} 会话 / ${d.leads} 线索`}
+            style={{ flex: 1, display: "flex", alignItems: "flex-end", gap: 2, height: "100%" }}
+          >
+            <div
+              style={{
+                flex: 1,
+                height: `${Math.max(4, (d.conversations / max) * 100)}%`,
+                background: "#ADC6FF",
+                borderRadius: 3,
+              }}
+            />
+            <div
+              style={{
+                flex: 1,
+                height: `${Math.max(4, (d.leads / max) * 100)}%`,
+                background: "#722ED1",
+                borderRadius: 3,
+              }}
+            />
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+        {days.map((d) => (
+          <div key={d.day} style={{ flex: 1, fontSize: 10, color: "#94a3b8", textAlign: "center" }}>
+            {d.day.slice(5)}
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 12, color: "#64748b" }}>
+        <span>
+          <span style={{ display: "inline-block", width: 10, height: 10, background: "#ADC6FF", borderRadius: 2, marginRight: 5 }} />
+          会话
+        </span>
+        <span>
+          <span style={{ display: "inline-block", width: 10, height: 10, background: "#722ED1", borderRadius: 2, marginRight: 5 }} />
+          新线索
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
+  const router = useRouter();
   const [overview, setOverview] = useState<Overview | null>(null);
   const [gaps, setGaps] = useState<Gap[]>([]);
-  const [costs, setCosts] = useState<CostRow[]>([]);
+  const [hotLeads, setHotLeads] = useState<HotLead[]>([]);
 
   useEffect(() => {
-    api.get<Overview>("/api/metrics/overview").then(setOverview);
+    const tz = -new Date().getTimezoneOffset();
+    api.get<Overview>(`/api/metrics/overview?tz_offset_minutes=${tz}`).then(setOverview);
     api.get<{ items: Gap[] }>("/api/metrics/knowledge-gaps").then((d) => setGaps(d.items));
-    api.get<{ items: CostRow[] }>("/api/metrics/costs").then((d) => setCosts(d.items));
+    api
+      .get<{ items: HotLead[] }>("/api/leads?grade=high&sort=recent")
+      .then((d) => setHotLeads(d.items.slice(0, 6)));
   }, []);
-
-  // 按日聚合 token 总量，渲染纯 CSS 迷你柱状图
-  const byDay = new Map<string, number>();
-  for (const row of costs) {
-    byDay.set(row.day, (byDay.get(row.day) ?? 0) + row.prompt_tokens + row.completion_tokens);
-  }
-  const days = [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-14);
-  const maxTokens = Math.max(1, ...days.map(([, v]) => v));
 
   return (
     <div>
-      <PageHeader
-        title="概览"
-        subtitle={`近 ${overview?.window_days ?? 14} 天数据`}
-      />
+      <PageHeader title="概览" subtitle={`获客漏斗与近 ${overview?.window_days ?? 14} 天趋势`} />
       <Row gutter={[16, 16]}>
-        <Col xs={12} md={8} xl={6}>
-          <StatCard icon={<MessageOutlined />} color="#2F54EB" title="消息数" value={overview?.messages} />
+        <Col xs={12} xl={6}>
+          <BigStat
+            icon={<MessageOutlined />}
+            color="#2F54EB"
+            title="今日新会话"
+            value={overview?.today.conversations}
+            href="/conversations"
+          />
         </Col>
-        <Col xs={12} md={8} xl={6}>
-          <StatCard icon={<TeamOutlined />} color="#13C2C2" title="会话数" value={overview?.conversations} />
+        <Col xs={12} xl={6}>
+          <BigStat
+            icon={<FunnelPlotOutlined />}
+            color="#722ED1"
+            title="今日新线索"
+            value={overview?.today.leads}
+            href="/leads"
+          />
         </Col>
-        <Col xs={12} md={8} xl={6}>
-          <StatCard icon={<RobotOutlined />} color="#52C41A" title="AI 自动回复" value={overview?.auto_replies} />
+        <Col xs={12} xl={6}>
+          <BigStat
+            icon={<FireOutlined />}
+            color="#F5222D"
+            title={`高意向线索（近 ${overview?.window_days ?? 14} 天）`}
+            value={overview?.funnel.leads_high}
+            href="/leads?grade=high"
+          />
         </Col>
-        <Col xs={12} md={8} xl={6}>
-          <StatCard icon={<StopOutlined />} color="#FAAD14" title="安全拒答" value={overview?.refused} />
-        </Col>
-        <Col xs={12} md={8} xl={6}>
-          <StatCard icon={<UserSwitchOutlined />} color="#FA541C" title="人工接管" value={overview?.handoffs} />
-        </Col>
-        <Col xs={12} md={8} xl={6}>
-          <StatCard icon={<FunnelPlotOutlined />} color="#722ED1" title="线索总数" value={overview?.leads_total} />
-        </Col>
-        <Col xs={12} md={8} xl={6}>
-          <StatCard icon={<FireOutlined />} color="#F5222D" title="高意向线索" value={overview?.leads_high} />
+        <Col xs={12} xl={6}>
+          <BigStat
+            icon={<UserSwitchOutlined />}
+            color="#FA541C"
+            title="待人工接管"
+            value={overview?.pending_handoffs}
+            href="/conversations?status=handoff_pending"
+            alert={(overview?.pending_handoffs ?? 0) > 0}
+          />
         </Col>
       </Row>
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} lg={14}>
+          <Card title={`转化漏斗（近 ${overview?.window_days ?? 14} 天）`}>
+            {overview ? <Funnel data={overview.funnel} /> : null}
+            <div style={{ marginTop: 14, fontSize: 12, color: "#94a3b8" }}>
+              AI 自动回复 {overview?.auto_replies ?? "—"} 条 · 安全拒答 {overview?.refused ?? "—"} 条
+            </div>
+          </Card>
+          <Card title="每日 会话 / 新线索" style={{ marginTop: 16 }}>
+            {overview ? <Trend data={overview.trend} /> : null}
+          </Card>
+        </Col>
         <Col xs={24} lg={10}>
-          <Card title="模型用量（Token / 日）" styles={{ body: { paddingTop: 12 } }}>
-            {days.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无调用记录" />
+          <Card
+            title="最新高意向线索"
+            extra={
+              <Link href="/leads?grade=high" style={{ fontSize: 12 }}>
+                全部 <RightOutlined style={{ fontSize: 10 }} />
+              </Link>
+            }
+            styles={{ body: { padding: hotLeads.length ? "4px 0" : undefined } }}
+          >
+            {hotLeads.length === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="暂无高意向线索——对话中出现购买意图后自动生成"
+              />
             ) : (
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 120 }}>
-                {days.map(([day, tokens]) => (
-                  <Tooltip key={day} title={`${day}：${tokens.toLocaleString()} tokens`}>
-                    <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-end", height: "100%" }}>
-                      <div
-                        style={{
-                          height: `${Math.max(6, (tokens / maxTokens) * 100)}%`,
-                          background: "linear-gradient(180deg,#597EF7,#2F54EB)",
-                          borderRadius: 4,
-                        }}
-                      />
-                      <div style={{ fontSize: 10, color: "#94a3b8", textAlign: "center", marginTop: 4 }}>
-                        {day.slice(5)}
+              hotLeads.map((l) => {
+                const name =
+                  l.company ?? l.name ?? (l.user?.username ? `@${l.user.username}` : `线索 #${l.id}`);
+                return (
+                  <div
+                    key={l.id}
+                    onClick={() => router.push(`/leads/${l.id}`)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 12,
+                      padding: "10px 20px",
+                      cursor: "pointer",
+                      borderBottom: "1px solid #f8fafc",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 10,
+                        flexShrink: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#fff",
+                        fontWeight: 600,
+                        background: avatarColor(l.user?.telegram_user_id ?? l.id),
+                      }}
+                    >
+                      {initialOf(name)}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0, lineHeight: 1.35 }}>
+                      <div style={{ fontWeight: 570, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {name}
+                      </div>
+                      <div style={{ fontSize: 12, color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {(l.score_reasons ?? [])
+                          .slice(0, 2)
+                          .map((r) => SCORE_REASON[r]?.replace(/\s[+−]\d+$/, "") ?? r)
+                          .join(" · ") || l.requirement || "—"}
                       </div>
                     </div>
-                  </Tooltip>
-                ))}
-              </div>
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <div style={{ fontWeight: 700, color: "#F5222D", fontSize: 16 }}>{l.score}</div>
+                      <div style={{ fontSize: 11, color: "#cbd5e1" }}>{fromNow(l.updated_at)}</div>
+                    </div>
+                  </div>
+                );
+              })
             )}
           </Card>
         </Col>
-        <Col xs={24} lg={14}>
-          <Card
-            title="知识库缺口"
-            extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>最近被拒答的用户问题——补充对应文档可提高自动解决率</Typography.Text>}
-          >
-            <Table<Gap>
-              rowKey={(g) => `${g.conversation_id}-${g.refused_at}`}
-              dataSource={gaps}
-              size="small"
-              pagination={{ pageSize: 8, hideOnSinglePage: true }}
-              locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无拒答记录" /> }}
-              columns={[
-                {
-                  title: "用户问题",
-                  dataIndex: "question",
-                  render: (q: string | null, row) => (
-                    <Link href={`/conversations/${row.conversation_id}`}>{q ?? "（未知）"}</Link>
-                  ),
-                },
-                { title: "时间", dataIndex: "refused_at", width: 120, render: fromNow },
-              ]}
-            />
-          </Card>
-        </Col>
       </Row>
+
+      <Card
+        title="知识库缺口"
+        extra={
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            最近被拒答的用户问题——补充对应文档可提高自动解决率
+          </Typography.Text>
+        }
+        style={{ marginTop: 16 }}
+      >
+        <Table<Gap>
+          rowKey={(g) => `${g.conversation_id}-${g.refused_at}`}
+          dataSource={gaps}
+          size="small"
+          pagination={{ pageSize: 8, hideOnSinglePage: true }}
+          locale={{
+            emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无拒答记录" />,
+          }}
+          columns={[
+            {
+              title: "用户问题",
+              dataIndex: "question",
+              render: (q: string | null, row) => (
+                <Link href={`/conversations?id=${row.conversation_id}`}>{q ?? "（未知）"}</Link>
+              ),
+            },
+            { title: "时间", dataIndex: "refused_at", width: 120, render: fromNow },
+          ]}
+        />
+      </Card>
     </div>
   );
 }

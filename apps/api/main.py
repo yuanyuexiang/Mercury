@@ -19,6 +19,7 @@ from api.routers import (
     health,
     knowledge,
     leads,
+    meta,
     metrics,
     users,
     webhook,
@@ -54,6 +55,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(title="Mercury", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.include_router(health.router)
+    app.include_router(meta.router)
     app.include_router(webhook.router)
     app.include_router(auth.router)
     app.include_router(conversations.router)
