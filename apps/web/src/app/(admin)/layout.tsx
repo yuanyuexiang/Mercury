@@ -105,8 +105,18 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         >
           {NAV.map((item) => {
             const active = selected === item.key;
+            // 颜色写死在最内层：会话图标外面包着 Badge，其 wrapper 自带黑色文字色，
+            // 靠 Link 继承会被它截胡（深色栏上图标"消失"的教训）
             const icon = (
-              <span style={{ fontSize: 19, lineHeight: 1 }}>{item.icon}</span>
+              <span
+                style={{
+                  fontSize: 19,
+                  lineHeight: 1,
+                  color: active ? "#fff" : "rgba(255,255,255,0.55)",
+                }}
+              >
+                {item.icon}
+              </span>
             );
             return (
               <Tooltip key={item.key} title={item.label} placement="right">
