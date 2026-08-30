@@ -10,7 +10,7 @@ import {
   MessageOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
-import { Badge, Layout, Tooltip } from "antd";
+import { Badge, Tooltip } from "antd";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -66,8 +66,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const title = brandTitle(brand);
 
   return (
-    <Layout style={{ minHeight: "100vh" }}>
-      <div
+    // 显式 flex 横向布局（不用 AntD Layout：它默认纵向，仅识别 Layout.Sider 才变横向）
+    <div style={{ display: "flex", minHeight: "100vh", background: "#f5f7fa" }}>
+      <aside
         style={{
           width: 64,
           flexShrink: 0,
@@ -79,6 +80,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           flexDirection: "column",
           alignItems: "center",
           padding: "14px 0 14px",
+          zIndex: 10,
         }}
       >
         <Tooltip title={`${title} · 询盘转化系统${brand ? "，Powered by Mercury" : ""}`} placement="right">
@@ -166,13 +168,13 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             <LogoutOutlined />
           </button>
         </Tooltip>
-      </div>
+      </aside>
 
-      <Layout.Content>
+      <main style={{ flex: 1, minWidth: 0 }}>
         <div style={{ padding: "20px 24px 36px", maxWidth: 1480, margin: "0 auto" }}>
           {children}
         </div>
-      </Layout.Content>
-    </Layout>
+      </main>
+    </div>
   );
 }
