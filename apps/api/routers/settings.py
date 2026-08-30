@@ -26,6 +26,7 @@ def _provider_out(p: LlmProvider) -> dict[str, Any]:
         "api_key_masked": f"****{p.api_key_enc[-4:]}" if p.api_key_enc else "",
         "chat_model": p.chat_model,
         "fallback_model": p.fallback_model,
+        "embed_model": p.embed_model,
         "supports_json_schema": p.supports_json_schema,
         "is_active": p.is_active,
         "last_test_at": p.last_test_at.isoformat() if p.last_test_at else None,
@@ -46,6 +47,7 @@ class ProviderCreate(BaseModel):
     api_key: str
     chat_model: str
     fallback_model: str = ""
+    embed_model: str = ""  # 空 = embedding 用 env 兜底；必须为 1536 维模型
     supports_json_schema: bool = True
 
 
@@ -55,6 +57,7 @@ class ProviderPatch(BaseModel):
     api_key: str | None = None  # 传了才更新密文，不传保留（§10）
     chat_model: str | None = None
     fallback_model: str | None = None
+    embed_model: str | None = None
     supports_json_schema: bool | None = None
 
 
@@ -74,6 +77,7 @@ async def create_provider(request: Request, body: ProviderCreate) -> dict[str, A
             api_key_enc=encrypt_api_key(settings, body.api_key),
             chat_model=body.chat_model,
             fallback_model=body.fallback_model or None,
+            embed_model=body.embed_model or None,
             supports_json_schema=body.supports_json_schema,
         )
         session.add(provider)
@@ -100,6 +104,8 @@ async def patch_provider(request: Request, provider_id: int, body: ProviderPatch
             _check_base_url(request, updates["base_url"])
         if "fallback_model" in updates and not updates["fallback_model"]:
             updates["fallback_model"] = None
+        if "embed_model" in updates and not updates["embed_model"]:
+            updates["embed_model"] = None
         for key, value in updates.items():
             setattr(provider, key, value)
         provider.updated_at = func.now()  # type: ignore[assignment]

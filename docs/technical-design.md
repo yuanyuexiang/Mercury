@@ -25,7 +25,7 @@ MVP 文档留了若干开放选项，这里全部定下来，附理由：
 | PDF / 网页解析 | **pypdf**；网页用 **trafilatura** | 够用且轻 |
 | 后台认证 | **单管理员，env 配置凭据（密码 bcrypt hash），JWT 放 httpOnly cookie，同域部署** | MVP 无多用户需求；Traefik 下 web 与 api 同域名（`/api` 前缀），cookie 最简单也最安全 |
 | 人工提醒渠道 | **Telegram 通知**（发给 `OPERATOR_TELEGRAM_CHAT_ID` 指定的运营者私聊/群） | P0 内零额外依赖 |
-| 模型配置方式 | **后台可配多供应商（DB 加密存储）+ env 兜底** | 交付客户后换模型/换 key 不需重新部署；api_key 用 Fernet 加密存库（主密钥在 env），兼容"不存明文密钥"红线；embedding 模型仅 env 配置（换维度需全量重索引，不进后台） |
+| 模型配置方式 | **后台可配多供应商（DB 加密存储）+ env 兜底**，对话与 embedding 均可后台配 | 交付客户后换模型/换 key 不需重新部署；api_key 用 Fernet 加密存库（主密钥在 env）；embedding 有运行时维度守卫（非 1536 维报明确错误），换维度需全量重索引（UI 有提示） |
 | Python 依赖管理 | **uv + 单一根 pyproject**（hatchling 多包映射：apps/api、apps/worker、packages/* 以顶层包 `api`/`worker`/`domain`/`llm`/`integrations`/`observability` 导入，目录布局不变） | uv workspace 要求每包独立 pyproject + 嵌套同名目录，会破坏本文档所有路径引用；模块化单体无需按包发版，单根项目更简 |
 | 前端 | **Next.js 15 App Router + TypeScript + Ant Design 5** | 上游文档已定 |
 
@@ -569,7 +569,7 @@ ai_active ──user_request/sensitive/manual──▶ handoff_pending ──管
 
 - 基于 `openai` SDK。配置经 `ProviderConfigSource` 协议解析，优先级：**DB 激活供应商（llm_providers.is_active）→ env 兜底**（`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_CHAT_MODEL`/`LLM_CHAT_MODEL_FALLBACK`）。M1–M7 只有 `EnvConfigSource`；M8 加 `DbConfigSource`：进程内缓存 60s + 激活/修改时 Redis pub/sub 广播失效，worker 无需重启即热切换。
 - api_key 存库用 Fernet 加密（`cryptography`），主密钥 `SETTINGS_ENCRYPTION_KEY` 仅在 env；任何 API 响应与日志只出现末 4 位。
-- `LLM_EMBED_MODEL` 仅 env 配置，不进后台（换 embedding 模型/维度需全量重建向量索引，P1 再做带重索引流程的 UI）。
+- embedding 也可后台配（`llm_providers.embed_model`，`DynamicEmbedder` 解析：供应商配置 → env 兜底）；运行时维度守卫拒绝非 1536 维向量（换维度需全量重索引，UI 有提示）——M8 后修订，替代原"仅 env"限制。
 - 统一封装 `chat(messages, schema=None, purpose="rag|triage|extract|summary")`，按 purpose 分两档策略：
   - **用户回复路径**（triage/rag）：共享端到端 deadline（`REPLY_DEADLINE_S`，默认 5s）——triage 上限 2s 且计入总预算，RAG 生成获得剩余时间；不做同调用重试、不切 fallback，超时或失败立即降级（triage 按默认值继续、RAG 走拒答转人工）；
   - **非用户路径**（extract / summary / 索引，超时 30s）：重试 1 次，连续失败切 fallback 模型；

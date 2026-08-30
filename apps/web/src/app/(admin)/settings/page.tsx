@@ -25,6 +25,7 @@ interface Provider {
   api_key_masked: string;
   chat_model: string;
   fallback_model: string | null;
+  embed_model: string | null;
   supports_json_schema: boolean;
   is_active: boolean;
   last_test_at: string | null;
@@ -105,7 +106,8 @@ export default function SettingsPage() {
         }
       >
         <Typography.Paragraph type="secondary">
-          激活的供应商用于对话模型（切换即时生效）；embedding 模型仅通过环境变量配置。
+          激活的供应商用于对话与 embedding（切换即时生效）。embedding 模型必须是 1536
+          维（如 text-embedding-3-small）；更换 embedding 模型后需对所有文档重建索引。
         </Typography.Paragraph>
         <Table<Provider>
           rowKey="id"
@@ -122,7 +124,12 @@ export default function SettingsPage() {
               ),
             },
             { title: "Base URL", dataIndex: "base_url", ellipsis: true },
-            { title: "模型", dataIndex: "chat_model" },
+            { title: "对话模型", dataIndex: "chat_model" },
+            {
+              title: "Embedding",
+              dataIndex: "embed_model",
+              render: (v: string | null) => v ?? "（env 兜底）",
+            },
             { title: "API Key", dataIndex: "api_key_masked", width: 110 },
             {
               title: "连接测试",
@@ -196,6 +203,12 @@ export default function SettingsPage() {
           </Form.Item>
           <Form.Item name="fallback_model" label="Fallback 模型（可选）">
             <Input />
+          </Form.Item>
+          <Form.Item
+            name="embed_model"
+            label="Embedding 模型（可选，必须 1536 维；留空用环境变量兜底）"
+          >
+            <Input placeholder="text-embedding-3-small" />
           </Form.Item>
           <Form.Item name="supports_json_schema" valuePropName="checked" initialValue={true}>
             <Checkbox>支持严格 JSON Schema（structured outputs）</Checkbox>

@@ -13,9 +13,8 @@ from integrations.locks import RedisLock
 from integrations.sheets import build_lead_sync
 from integrations.telegram import build_sender
 from llm.brain import ConversationSummarizer, RagBrain
-from llm.client import build_embedder
 from llm.extraction import LlmLeadExtractor
-from llm.provider_config import DynamicChatClient, ProviderSource
+from llm.provider_config import DynamicChatClient, DynamicEmbedder, ProviderSource
 from observability.logging import configure_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -44,9 +43,11 @@ async def on_startup(ctx: dict[str, Any]) -> None:
     provider_source.start_listener()
     ctx["provider_source"] = provider_source
     chat = DynamicChatClient(provider_source)
-    embedder = build_embedder(settings)  # embedding 仅 env 配置（§12）
-    ctx["embedder"] = embedder  # None → 索引任务明确失败
-    ctx["brain"] = RagBrain(chat, embedder, settings) if embedder else None
+    embedder = DynamicEmbedder(provider_source, settings)  # DB 供应商优先，env 兜底（§12 修订）
+    ctx["embedder"] = embedder
+    ctx["brain"] = RagBrain(
+        chat, embedder, settings
+    )  # 未配置时调用抛 LlmNotConfiguredError，编排层降级
     ctx["extractor"] = LlmLeadExtractor(chat)
     ctx["summarizer"] = ConversationSummarizer(chat)
     ctx["sync_port"] = build_lead_sync(settings)  # None → 同步任务走 retry 等待配置

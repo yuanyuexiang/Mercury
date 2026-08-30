@@ -6,6 +6,10 @@ from typing import Literal
 from pydantic import BaseModel
 
 
+class LlmNotConfiguredError(Exception):
+    """无可用 LLM 配置（DB 未激活且 env 未配置）——编排层降级为"系统未就绪"文案。"""
+
+
 class Deadline:
     """回复路径端到端预算（§12）：triage 计入总预算，RAG 拿剩余时间。"""
 

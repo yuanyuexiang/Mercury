@@ -14,7 +14,8 @@ from dataclasses import dataclass
 import structlog
 from cryptography.fernet import Fernet
 from domain.config import Settings
-from domain.models import LlmProvider
+from domain.models import EMBEDDING_DIM, LlmProvider
+from domain.schemas import LlmNotConfiguredError
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,8 +26,8 @@ PROVIDER_INVALIDATE_CHANNEL = "mercury:llm_provider_changed"
 CACHE_TTL_S = 60.0
 
 
-class ProviderNotConfigured(Exception):
-    """既无 DB 激活供应商也无 env 兜底配置。"""
+# 领域层异常的别名：编排层据此降级为"系统未就绪"文案
+ProviderNotConfigured = LlmNotConfiguredError
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class ProviderConfig:
     chat_model: str
     fallback_model: str = ""
     supports_json_schema: bool = True
+    embed_model: str = ""  # 空 = 该供应商不提供 embedding，用 env 兜底
     source: str = "env"  # env|db，日志与后台展示用
 
 
@@ -65,6 +67,7 @@ def env_provider(settings: Settings) -> ProviderConfig | None:
             api_key=settings.llm_api_key,
             chat_model=settings.llm_chat_model,
             fallback_model=settings.llm_chat_model_fallback,
+            embed_model=settings.llm_embed_model,
             source="env",
         )
     return None
@@ -111,6 +114,7 @@ class ProviderSource:
                     chat_model=row.chat_model,
                     fallback_model=row.fallback_model or "",
                     supports_json_schema=row.supports_json_schema,
+                    embed_model=row.embed_model or "",
                     source="db",
                 )
         except Exception:
@@ -181,3 +185,47 @@ class DynamicChatClient:
         return await self._client.chat(  # type: ignore[attr-defined]
             messages, purpose=purpose, timeout_s=timeout_s, schema=schema
         )
+
+
+class DynamicEmbedder:
+    """每次调用解析供应商配置的 embedder（§12 修订：后台可配 embedding）。
+
+    解析顺序：激活供应商配了 embed_model → 用它；否则 env 兜底（LLM_API_KEY + LLM_EMBED_MODEL）。
+    维度守卫：返回向量必须是 EMBEDDING_DIM（1536）维，否则报明确错误——
+    换维度意味着全量重建向量库，不允许静默发生。
+    """
+
+    def __init__(self, source: ProviderSource, settings: Settings) -> None:
+        self._source = source
+        self._settings = settings
+        self._active_key: tuple[str, str, str] | None = None
+        self._embedder: object | None = None
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        from llm.client import OpenAIEmbedder
+
+        config = await self._source.get()
+        if config is not None and config.embed_model:
+            key = (config.base_url, config.api_key, config.embed_model)
+        elif self._settings.llm_api_key:
+            key = (
+                self._settings.llm_base_url,
+                self._settings.llm_api_key,
+                self._settings.llm_embed_model,
+            )
+        else:
+            raise LlmNotConfiguredError(
+                "无可用 embedding 配置（供应商未配 embed_model 且 env 无 LLM_API_KEY）"
+            )
+        if key != self._active_key:
+            self._embedder = OpenAIEmbedder(*key)
+            self._active_key = key
+            logger.info("embedder_rebuilt", model=key[2])
+        assert self._embedder is not None
+        vectors = await self._embedder.embed(texts)  # type: ignore[attr-defined]
+        if vectors and len(vectors[0]) != EMBEDDING_DIM:
+            raise RuntimeError(
+                f"embedding 维度 {len(vectors[0])} ≠ {EMBEDDING_DIM}：换维度需全量重建向量库，"
+                f"请改用 {EMBEDDING_DIM} 维模型（如 text-embedding-3-small）"
+            )
+        return vectors

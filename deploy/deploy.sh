@@ -23,47 +23,31 @@ if [ ! -f .env ]; then
   FERNET_KEY="$(docker run --rm "$APP_IMAGE" python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())")"
   PG_PASSWORD="$(openssl rand -hex 16)"
   cat > .env <<EOF
-# 由 deploy.sh 首次部署自动生成（$(date +%F)）。
-# 待补三项后重新部署即可完整启用（Actions 里 Run workflow，或 bash deploy.sh $TAG）：
-#   TELEGRAM_BOT_TOKEN / OPERATOR_TELEGRAM_CHAT_ID / LLM_API_KEY
+# 由 deploy.sh 首次部署自动生成（$(date +%F)）。只保留密钥与基础设施配置；
+# LLM 在后台「模型配置」页配置；调优参数走代码默认值（packages/domain/config.py）。
+# 待补两项后重新部署即可启用 bot（Actions 里 Run workflow）：
+#   TELEGRAM_BOT_TOKEN / OPERATOR_TELEGRAM_CHAT_ID
 
-# Telegram（未配置时 bot 不收发消息，其余功能正常）
+# Telegram
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_WEBHOOK_SECRET=$(openssl rand -hex 32)
 OPERATOR_TELEGRAM_CHAT_ID=
-
-# LLM（embedding 必须靠这里的 key；对话模型也可在后台「模型配置」里配）
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=
-LLM_CHAT_MODEL=gpt-4o-mini
-LLM_CHAT_MODEL_FALLBACK=
-LLM_EMBED_MODEL=text-embedding-3-small
-SETTINGS_ENCRYPTION_KEY=${FERNET_KEY}
-ALLOW_PRIVATE_LLM_BASE_URL=false
-RAG_MIN_SIMILARITY=0.60
-RAG_TOP_K=6
-REPLY_DEADLINE_S=5
 
 # 数据（容器内地址）
 DATABASE_URL=postgresql+asyncpg://mercury:${PG_PASSWORD}@postgres:5432/mercury
 REDIS_URL=redis://redis:6379/0
 
-# 后台
+# 后台（hash 单引号：防 compose dotenv 对 \$ 做插值）
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD_HASH=${ADMIN_HASH}
+ADMIN_PASSWORD_HASH='${ADMIN_HASH}'
 JWT_SECRET=$(openssl rand -hex 32)
 PUBLIC_BASE_URL=https://${DOMAIN}
+SETTINGS_ENCRYPTION_KEY=${FERNET_KEY}
 
-# Google Sheets（可后补，配好后积压任务自动恢复）
-GOOGLE_SERVICE_ACCOUNT_JSON=
-LEADS_SPREADSHEET_ID=
+# 可选：Sheets 同步（GOOGLE_SERVICE_ACCOUNT_JSON / LEADS_SPREADSHEET_ID）
+# 可选：LLM env 兜底（LLM_API_KEY / LLM_CHAT_MODEL 等，推荐用后台配置）
 
-# 运行
-LOG_LEVEL=INFO
-DATA_RETENTION_DAYS=180
-STORAGE_DIR=var/storage
-
-# 部署
+# 部署（compose.prod.yaml 插值用）
 TRAEFIK_NETWORK=${TRAEFIK_NETWORK}
 TRAEFIK_CERTRESOLVER=${TRAEFIK_CERTRESOLVER}
 PUBLIC_HOST=${DOMAIN}
@@ -76,19 +60,23 @@ EOF
   echo "  初始密码：${ADMIN_PASSWORD}"
   echo "  ⚠️ 只显示这一次，立即保存！"
   echo "  待补配置（编辑 ~/mercury/.env 后重新部署）："
-  echo "    TELEGRAM_BOT_TOKEN / OPERATOR_TELEGRAM_CHAT_ID / LLM_API_KEY"
+  echo "    TELEGRAM_BOT_TOKEN / OPERATOR_TELEGRAM_CHAT_ID"
+  echo "  LLM 直接在后台「模型配置」页配置即可（无需改 .env）"
   echo "=================================================================="
 fi
 
-set -a
-# shellcheck disable=SC1091
-source .env
-set +a
+# 绝不 source .env：bcrypt hash 以 $2b$ 开头，bash 会当位置参数展开（set -u 下直接退出）。
+# compose 用 --env-file 自行解析（dotenv 不做 shell 展开）；脚本只提取自己要用的值。
+env_get() { grep -E "^${1}=" .env | head -1 | cut -d'=' -f2-; }
+PUBLIC_BASE_URL="$(env_get PUBLIC_BASE_URL)"
+TELEGRAM_BOT_TOKEN="$(env_get TELEGRAM_BOT_TOKEN)"
+TELEGRAM_WEBHOOK_SECRET="$(env_get TELEGRAM_WEBHOOK_SECRET)"
 export IMAGE_TAG="$TAG"
+COMPOSE=(docker compose --env-file .env -f compose.prod.yaml)
 
 echo "==> 部署 $TAG（当前运行：${PREV_TAG:-无记录}）"
-docker compose -f compose.prod.yaml pull --quiet
-docker compose -f compose.prod.yaml up -d --remove-orphans
+"${COMPOSE[@]}" pull --quiet
+"${COMPOSE[@]}" up -d --remove-orphans
 
 echo "==> 健康检查 ${PUBLIC_BASE_URL}/health/ready"
 if curl --fail --silent --retry 24 --retry-delay 5 --retry-all-errors \
@@ -113,6 +101,6 @@ fi
 echo "==> 健康检查失败！" >&2
 if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$TAG" ]; then
   echo "==> 自动回滚到 $PREV_TAG" >&2
-  IMAGE_TAG="$PREV_TAG" docker compose -f compose.prod.yaml up -d --remove-orphans
+  IMAGE_TAG="$PREV_TAG" "${COMPOSE[@]}" up -d --remove-orphans
 fi
 exit 1

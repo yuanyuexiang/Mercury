@@ -216,6 +216,7 @@ async def test_provider_crud_activate_and_hot_reload(
             "base_url": "https://api.deepseek.com/v1",
             "api_key": "sk-test-1234abcd",
             "chat_model": "deepseek-chat",
+            "embed_model": "text-embedding-3-small",
         },
         headers=WRITE_HEADERS,
     )
@@ -238,6 +239,7 @@ async def test_provider_crud_activate_and_hot_reload(
     config = await source.get()
     assert config is not None and config.source == "db"
     assert config.chat_model == "deepseek-chat" and config.api_key == "sk-test-1234abcd"
+    assert config.embed_model == "text-embedding-3-small"  # 后台可配 embedding（§12 修订）
 
     # 测试连接（Fake chat 工厂）
     resp = await client.post(

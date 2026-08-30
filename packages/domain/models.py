@@ -314,6 +314,8 @@ class LlmProvider(Base):
     api_key_enc: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet 密文，绝不存明文
     chat_model: Mapped[str] = mapped_column(Text, nullable=False)
     fallback_model: Mapped[str | None] = mapped_column(Text)
+    # embedding 模型（可空 = 用 env 兜底）；必须与向量库维度一致（1536），换维度需全量重索引
+    embed_model: Mapped[str | None] = mapped_column(Text)
     supports_json_schema: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )

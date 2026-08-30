@@ -16,6 +16,7 @@ from domain.models import Conversation, Lead, Message, User
 from domain.schemas import (
     Deadline,
     LeadExtraction,
+    LlmNotConfiguredError,
     PlannedMessage,
     RagAnswer,
     ReplyPlan,
@@ -143,6 +144,20 @@ async def _handle_human_command(
     )
 
 
+def _not_configured_plan(conversation: Conversation, update_id: int) -> ReplyPlan:
+    return ReplyPlan(
+        messages=[
+            PlannedMessage(
+                delivery_key=f"reply:{update_id}",
+                text=texts.LLM_NOT_CONFIGURED,
+                sender_type="system",
+                answer_status="refused",
+            )
+        ],
+        notify_operator=f"LLM 未配置，会话 {conversation.id} 无法回复（后台「模型配置」可激活）",
+    )
+
+
 async def _decide(
     session: AsyncSession,
     brain: Brain | None,
@@ -153,17 +168,7 @@ async def _decide(
 ) -> ReplyPlan:
     """非命令文本的路由（§6 第 3c–3e 步）：triage → RAG/闲聊，全程共享端到端 deadline。"""
     if brain is None:
-        return ReplyPlan(
-            messages=[
-                PlannedMessage(
-                    delivery_key=f"reply:{update_id}",
-                    text=texts.LLM_NOT_CONFIGURED,
-                    sender_type="system",
-                    answer_status="refused",
-                )
-            ],
-            notify_operator=f"LLM 未配置，会话 {conversation.id} 无法自动回复",
-        )
+        return _not_configured_plan(conversation, update_id)
 
     deadline = Deadline(reply_deadline_s)
     recent = await repositories.get_recent_messages(session, conversation.id)
@@ -171,6 +176,8 @@ async def _decide(
 
     try:
         tri = await brain.triage(history, deadline)
+    except LlmNotConfiguredError:
+        return _not_configured_plan(conversation, update_id)
     except Exception:
         logger.warning("triage_failed_using_defaults", update_id=update_id)
         tri = TriageResult()  # risk=none, needs_rag=True：宁可多检索，不可漏风险以外的回答
@@ -207,6 +214,8 @@ async def _decide(
 
     try:
         ans = await brain.answer(session, text_content, history, tri.language, deadline)
+    except LlmNotConfiguredError:
+        return _not_configured_plan(conversation, update_id)
     except Exception:
         logger.warning("rag_answer_failed_refusing", update_id=update_id)
         ans = RagAnswer(refused=True)

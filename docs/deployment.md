@@ -24,15 +24,17 @@ git push
 完成后验证：`curl https://mercury.asksquirrel.ai/health/ready` → `{"status":"ok"}`，
 后台 `https://mercury.asksquirrel.ai/login`（用户名 admin）。
 
-## 三、补齐三个凭据（bot 与 LLM 生效的前提）
+## 三、补齐两个凭据 + 后台配模型
 
-SSH 到服务器编辑 `~/mercury/.env`，填三项：
+SSH 到服务器编辑 `~/mercury/.env`，只填两项：
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=        # BotFather /newbot（见附录 1）
 OPERATOR_TELEGRAM_CHAT_ID= # 人工提醒发到哪（见附录 2）
-LLM_API_KEY=               # OpenAI 兼容 key（LLM_CHAT_MODEL 默认 gpt-4o-mini，可改）
 ```
+
+LLM 不进 .env：登录后台 → 「模型配置」→ 新增供应商（base_url / key / 对话模型 /
+embedding 模型）→ 测试 → 激活，即时生效。
 
 然后 Actions → Deploy → Run workflow 重新部署（镜像是私有的，拉取授权由 workflow 临时完成，所以统一走 Actions 触发）。
 重新部署会**自动注册 webhook**——之后 Telegram 里给 bot 发消息就通了。
