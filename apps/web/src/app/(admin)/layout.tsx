@@ -1,5 +1,6 @@
 "use client";
-// 登录态布局：品牌区（客户白标）+ 图标导航（会话挂待接管 badge）+ 底部用户区。
+// 登录态布局：微信式窄图标侧边栏（64px，纯图标 + Tooltip）——
+// 品牌方块在顶、导航图标居中、退出在底；会话图标挂待接管红色 badge。
 import {
   ApiOutlined,
   BookOutlined,
@@ -9,13 +10,22 @@ import {
   MessageOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
-import { Badge, Button, Layout, Menu, Tooltip } from "antd";
+import { Badge, Layout, Tooltip } from "antd";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
 import { brandTitle, fetchBrandName } from "@/lib/brand";
+
+const NAV = [
+  { key: "/dashboard", icon: <DashboardOutlined />, label: "概览" },
+  { key: "/conversations", icon: <MessageOutlined />, label: "会话" },
+  { key: "/leads", icon: <FunnelPlotOutlined />, label: "线索" },
+  { key: "/knowledge", icon: <BookOutlined />, label: "知识库" },
+  { key: "/settings", icon: <ApiOutlined />, label: "模型配置" },
+  { key: "/system", icon: <SettingOutlined />, label: "系统设置" },
+];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -46,26 +56,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     };
   }, []);
 
-  const menu = [
-    { key: "/dashboard", icon: <DashboardOutlined />, label: <Link href="/dashboard">概览</Link> },
-    {
-      key: "/conversations",
-      icon: <MessageOutlined />,
-      label: (
-        <Link href="/conversations">
-          会话
-          {pending > 0 && (
-            <Badge count={pending} size="small" offset={[8, -2]} style={{ boxShadow: "none" }} />
-          )}
-        </Link>
-      ),
-    },
-    { key: "/leads", icon: <FunnelPlotOutlined />, label: <Link href="/leads">线索</Link> },
-    { key: "/knowledge", icon: <BookOutlined />, label: <Link href="/knowledge">知识库</Link> },
-    { key: "/settings", icon: <ApiOutlined />, label: <Link href="/settings">模型配置</Link> },
-    { key: "/system", icon: <SettingOutlined />, label: <Link href="/system">系统设置</Link> },
-  ];
-  const selected = menu.find((m) => pathname.startsWith(m.key))?.key ?? "/conversations";
+  const selected = NAV.find((m) => pathname.startsWith(m.key))?.key ?? "/conversations";
 
   const logout = async () => {
     await api.post("/api/auth/logout");
@@ -76,78 +67,109 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
-      <Layout.Sider width={216} style={{ position: "sticky", top: 0, height: "100vh" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "18px 20px 14px",
-          }}
-        >
+      <div
+        style={{
+          width: 64,
+          flexShrink: 0,
+          background: "#0f172a",
+          position: "sticky",
+          top: 0,
+          height: "100vh",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          padding: "14px 0 14px",
+        }}
+      >
+        <Tooltip title={`${title} · 询盘转化系统${brand ? "，Powered by Mercury" : ""}`} placement="right">
           <div
             style={{
-              width: 34,
-              height: 34,
-              borderRadius: 10,
+              width: 38,
+              height: 38,
+              borderRadius: 11,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               background: "linear-gradient(135deg,#2F54EB,#13C2C2)",
               color: "#fff",
               fontWeight: 700,
-              fontSize: 17,
-              flexShrink: 0,
+              fontSize: 18,
+              cursor: "default",
+              userSelect: "none",
             }}
           >
             {title.charAt(0).toUpperCase()}
           </div>
-          <div style={{ lineHeight: 1.2, minWidth: 0 }}>
-            <div
-              style={{
-                color: "#fff",
-                fontWeight: 650,
-                fontSize: 16,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {title}
-            </div>
-            <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 11 }}>询盘转化系统</div>
-          </div>
-        </div>
-        <Menu theme="dark" mode="inline" selectedKeys={[selected]} items={menu} />
-        <div
+        </Tooltip>
+
+        <nav
           style={{
-            position: "absolute",
-            bottom: 0,
-            width: "100%",
-            padding: "10px 16px 12px",
-            borderTop: "1px solid rgba(255,255,255,0.08)",
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 6,
+            marginTop: 22,
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ color: "rgba(255,255,255,0.65)", fontSize: 13 }}>admin</span>
-            <Tooltip title="退出登录">
-              <Button
-                type="text"
-                size="small"
-                icon={<LogoutOutlined style={{ color: "rgba(255,255,255,0.65)" }} />}
-                onClick={logout}
-              />
-            </Tooltip>
-          </div>
-          {brand && (
-            <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, marginTop: 4 }}>
-              Powered by Mercury
-            </div>
-          )}
-        </div>
-      </Layout.Sider>
+          {NAV.map((item) => {
+            const active = selected === item.key;
+            const icon = (
+              <span style={{ fontSize: 19, lineHeight: 1 }}>{item.icon}</span>
+            );
+            return (
+              <Tooltip key={item.key} title={item.label} placement="right">
+                <Link
+                  href={item.key}
+                  style={{
+                    width: 42,
+                    height: 42,
+                    borderRadius: 10,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: active ? "#fff" : "rgba(255,255,255,0.55)",
+                    background: active ? "rgba(255,255,255,0.14)" : "transparent",
+                    transition: "background .15s, color .15s",
+                  }}
+                >
+                  {item.key === "/conversations" ? (
+                    <Badge count={pending} size="small" offset={[4, -2]} style={{ boxShadow: "none" }}>
+                      {icon}
+                    </Badge>
+                  ) : (
+                    icon
+                  )}
+                </Link>
+              </Tooltip>
+            );
+          })}
+        </nav>
+
+        <Tooltip title="admin · 退出登录" placement="right">
+          <button
+            onClick={logout}
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: 10,
+              border: "none",
+              background: "transparent",
+              color: "rgba(255,255,255,0.55)",
+              fontSize: 18,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <LogoutOutlined />
+          </button>
+        </Tooltip>
+      </div>
+
       <Layout.Content>
-        <div style={{ padding: "24px 28px 40px", maxWidth: 1400, margin: "0 auto" }}>
+        <div style={{ padding: "20px 24px 36px", maxWidth: 1480, margin: "0 auto" }}>
           {children}
         </div>
       </Layout.Content>
