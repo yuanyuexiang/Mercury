@@ -1,10 +1,12 @@
 # 质量门禁（技术方案 §17）：python 与 web 两个并行 job；LLM 全走 FakeLLM，无需任何真实 key。
+# PR 独立触发；push main/master 时由 Deploy workflow 经 workflow_call 复用本文件——
+# 测试不过不部署，且同一提交只跑一遍 CI。刻意不与 cd.yml 合并：
+# 触发场景、权限（deploy 持 SSH 凭据）、失败语义都不同，合并只会堆 if 条件。
 name: CI
 
 on:
-  push:
-    branches: [main, master]
   pull_request:
+  workflow_call:
 
 jobs:
   python:

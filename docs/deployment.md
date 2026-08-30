@@ -1,6 +1,6 @@
 # 部署手册（极简版）
 
-目标环境已内置在 `deploy.yml` 顶部 env：域名 `mercury.asksquirrel.ai`、Traefik 网络
+目标环境已内置在 `cd.yml` 顶部 env：域名 `mercury.asksquirrel.ai`、Traefik 网络
 `matrix-network`、证书 resolver `cloudflare`。换环境改那四行即可。
 
 部署链路：push（main/master）→ Actions 构建推 GHCR → **自动** scp 部署文件到服务器
@@ -49,7 +49,7 @@ Token 以加密形式存库（主密钥在服务器 .env 的 `SETTINGS_ENCRYPTIO
 | 备份 | backup 服务每日 `pg_dump`，保留 14 份 |
 | 换模型/换 key | 后台「模型配置」，无需重启 |
 | 换 bot / 改通知人 / 改品牌 | 后台「系统设置」，保存自动验证并注册 webhook，无需重启 |
-| 改域名/环境 | 改 `deploy.yml` 顶部 env 四行 + 服务器 `.env` 对应项 |
+| 改域名/环境 | 改 `cd.yml` 顶部 env 四行 + 服务器 `.env` 对应项 |
 | 后台改密码 | 生成新 hash 替换 `.env` 的 `ADMIN_PASSWORD_HASH` 后重新部署 |
 | 删用户数据 | `DELETE /api/users/by-telegram/{id}`（需登录 + CSRF 头） |
 

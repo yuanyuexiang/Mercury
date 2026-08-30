@@ -66,8 +66,8 @@ Telegram ──POST──▶ api /webhooks/telegram/{secret}
 Mercury/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml              # lint + 测试（PR / push，见 §17）
-│       └── deploy.yml          # 镜像 → GHCR → SSH 部署（main / 手动，见 §17）
+│       ├── ci.yml              # lint + 测试（PR 独立触发；push 时被 cd.yml 复用为门禁，见 §17）
+│       └── cd.yml          # 镜像 → GHCR → SSH 部署（main / 手动，见 §17）
 ├── apps/
 │   ├── api/                    # FastAPI 入口
 │   │   ├── main.py             # app 工厂、路由挂载、生命周期
@@ -697,7 +697,12 @@ PUBLIC_HOST=                    # 对外域名（PUBLIC_BASE_URL 的 host 部分
 - Web：**pnpm** + ESLint + `tsc --noEmit` + `next build`。
 - 镜像仓库：**GHCR**（`ghcr.io`，用内置 `GITHUB_TOKEN` 推送，不需要额外密钥）。
 
-### ci.yml — 质量门禁（所有分支 push + PR）
+### ci.yml — 质量门禁（PR 触发 + 被 cd.yml workflow_call 复用）
+
+刻意保持 ci.yml 与 cd.yml 两个文件（触发场景、权限、失败语义不同，合并只会堆 if 条件；
+deploy 持 SSH 凭据，PR 触发的 workflow 不应含凭据上下文）。push main/master 时 Deploy 的
+首个 job `uses: ./.github/workflows/ci.yml`——**测试不过不构建不部署**，同一提交 CI 只跑一遍；
+手动回滚（dispatch 填历史 tag）跳过 CI 与构建，保证回滚速度。
 
 两个并行 job：
 
@@ -707,7 +712,7 @@ PUBLIC_HOST=                    # 对外域名（PUBLIC_BASE_URL 的 host 部分
 
 main 开分支保护：CI 全绿才能合并。单人开发也走「短命分支 + PR」，让 CI 卡住坏提交，同时 PR 历史就是变更日志。
 
-### deploy.yml — 发布（push 到 main 自动触发 + workflow_dispatch 手动）
+### cd.yml — 发布（push 到 main 自动触发 + workflow_dispatch 手动）
 
 1. buildx 构建两个镜像——`mercury-app`（api/worker 共用，见 §16）与 `mercury-web`——tag 为 `sha-<short>` 和 `latest`，push GHCR（启用 gha 层缓存）。
 2. SSH 到演示服务器（secrets：`DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY`），执行 `docker compose pull && docker compose up -d`。服务器上的 compose 引用 GHCR 镜像；migration 由 §16 的一次性 alembic 服务在启动时执行。
@@ -731,7 +736,7 @@ main 开分支保护：CI 全绿才能合并。单人开发也走「短命分支
 | **M5 线索** | extraction/merge/scoring/追问、declined_fields | 演示剧本问题 3–4 产生 high 线索且理由正确；拒绝后不再追问 |
 | **M6 人工接管** | 状态机、/human、通知、命令处理 | `human_active` 下 AI 静默的集成测试通过 |
 | **M7 Sheets 同步** | integration_jobs、sync_lead、重试退避、摘要 | 断网重试后数据无丢失；Sheet 中行幂等更新 |
-| **M8 后台与部署** | 全部后台 API、Next.js 页面、认证、模型供应商配置（llm_providers + DbConfigSource + 加密 + 连接测试）、**deploy.yml（GHCR + SSH 部署 + 回滚）**、接入既有 Traefik（外部网络 + labels）、备份 | 完整跑通 MVP 文档 §10.2 演示验收剧本；后台切换供应商后 worker 不重启即生效；push main 自动发布且健康检查通过 |
+| **M8 后台与部署** | 全部后台 API、Next.js 页面、认证、模型供应商配置（llm_providers + DbConfigSource + 加密 + 连接测试）、**cd.yml（GHCR + SSH 部署 + 回滚）**、接入既有 Traefik（外部网络 + labels）、备份 | 完整跑通 MVP 文档 §10.2 演示验收剧本；后台切换供应商后 worker 不重启即生效；push main 自动发布且健康检查通过 |
 
 ---
 

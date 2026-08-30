@@ -23,7 +23,13 @@ env:
   TRAEFIK_CERTRESOLVER: cloudflare
 
 jobs:
+  # 质量门禁前置（复用 ci.yml）：测试不过不构建不部署；回滚（填历史 tag）跳过
+  ci:
+    if: github.event_name == 'push' || inputs.image_tag == ''
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: [ci]
     if: github.event_name == 'push' || inputs.image_tag == ''
     runs-on: ubuntu-latest
     permissions:
