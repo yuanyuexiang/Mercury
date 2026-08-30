@@ -9,9 +9,10 @@ import redis.asyncio as aioredis
 from arq import cron
 from arq.connections import RedisSettings
 from domain.config import get_settings, validate_production_settings
+from integrations.app_settings import AppSettingsStore
 from integrations.locks import RedisLock
 from integrations.sheets import build_lead_sync
-from integrations.telegram import build_sender
+from integrations.telegram import DynamicSender
 from llm.brain import ConversationSummarizer, RagBrain
 from llm.extraction import LlmLeadExtractor
 from llm.provider_config import DynamicChatClient, DynamicEmbedder, ProviderSource
@@ -37,7 +38,11 @@ async def on_startup(ctx: dict[str, Any]) -> None:
     ctx["redis_client"] = redis_client
     ctx["locker"] = RedisLock(redis_client, prefix="conv")
     ctx["index_locker"] = RedisLock(redis_client, prefix="index", ttl_seconds=120)
-    ctx["sender"] = build_sender(settings.telegram_bot_token, settings.operator_telegram_chat_id)
+    app_settings = AppSettingsStore(ctx["session_factory"], redis_client, settings)
+    app_settings.start_listener()
+    ctx["app_settings"] = app_settings
+    # 每次发送解析当前 token/chat_id（后台可配，migration 0007）；无 token 时打日志替身
+    ctx["sender"] = DynamicSender(app_settings)
     # chat 经 DynamicChatClient：DB 激活供应商优先、env 兜底，后台切换不重启即生效（§12）
     provider_source = ProviderSource(ctx["session_factory"], redis_client, settings)
     provider_source.start_listener()
@@ -45,8 +50,13 @@ async def on_startup(ctx: dict[str, Any]) -> None:
     chat = DynamicChatClient(provider_source)
     embedder = DynamicEmbedder(provider_source, settings)  # DB 供应商优先，env 兜底（§12 修订）
     ctx["embedder"] = embedder
+
+    # branding 动态读取：后台改品牌/语气，RAG 提示词即生效
+    async def _branding() -> tuple[str, str]:
+        return await app_settings.brand_name(), await app_settings.bot_tone_hint()
+
     ctx["brain"] = RagBrain(
-        chat, embedder, settings
+        chat, embedder, settings, branding=_branding
     )  # 未配置时调用抛 LlmNotConfiguredError，编排层降级
     ctx["extractor"] = LlmLeadExtractor(chat)
     ctx["summarizer"] = ConversationSummarizer(chat)
@@ -54,6 +64,7 @@ async def on_startup(ctx: dict[str, Any]) -> None:
 
 
 async def on_shutdown(ctx: dict[str, Any]) -> None:
+    await ctx["app_settings"].stop_listener()
     await ctx["provider_source"].stop_listener()
     await ctx["sender"].close()
     await ctx["redis_client"].aclose()

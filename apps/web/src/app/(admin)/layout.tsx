@@ -1,6 +1,7 @@
 "use client";
 // 登录态布局：品牌区（客户白标）+ 图标导航（会话挂待接管 badge）+ 底部用户区。
 import {
+  ApiOutlined,
   BookOutlined,
   DashboardOutlined,
   FunnelPlotOutlined,
@@ -61,7 +62,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     },
     { key: "/leads", icon: <FunnelPlotOutlined />, label: <Link href="/leads">线索</Link> },
     { key: "/knowledge", icon: <BookOutlined />, label: <Link href="/knowledge">知识库</Link> },
-    { key: "/settings", icon: <SettingOutlined />, label: <Link href="/settings">模型配置</Link> },
+    { key: "/settings", icon: <ApiOutlined />, label: <Link href="/settings">模型配置</Link> },
+    { key: "/system", icon: <SettingOutlined />, label: <Link href="/system">系统设置</Link> },
   ];
   const selected = menu.find((m) => pathname.startsWith(m.key))?.key ?? "/conversations";
 

@@ -362,3 +362,22 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class AppSetting(Base):
+    """系统设置 KV（migration 0007）：后台可配 Telegram 对接与品牌文案，DB 优先 env 兜底。
+
+    敏感值（bot token）Fernet 密文入库（is_encrypted=true），主密钥仅在 env（§12 同机制）。
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    is_encrypted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

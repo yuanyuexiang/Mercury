@@ -545,6 +545,11 @@ ai_active ──user_request/sensitive/manual──▶ handoff_pending ──管
 - `GET /api/metrics/pending` → `{pending_handoffs}`（侧边栏 badge 30s 轮询，保持轻量）。
 - `GET /api/metrics/costs` → 按日 token 与估算成本。
 - `GET /api/metrics/knowledge-gaps` → `answer_status='refused'` 的问题聚合列表。
+- 系统设置（app_settings 表，migration 0007；DB 优先 env 兜底、Fernet 加密、60s 缓存 + Redis 广播热生效，与供应商配置同机制）：
+  - `GET/PUT /api/settings/telegram` → Bot Token（保存前 getMe 验证，无效 422；成功后自动注册 webhook；回显一律脱敏末 4 位）+ 通知接收 Chat ID；
+  - `POST /api/settings/telegram/test` → 给通知接收人发测试消息，验证全链路；
+  - `GET/PUT /api/settings/general` → 品牌名称 / 回复语气（欢迎语、RAG 提示词、后台白标即时生效）；
+  - 发送侧 `DynamicSender`：每次发送解析当前 token，token 变化重建连接，无 token 退化为 LoggingSender。
 - 模型供应商配置：
   - `GET /api/settings/llm-providers` → 列表（api_key 一律脱敏为末 4 位，写入后不可读回明文）；
   - `POST /api/settings/llm-providers` / `PATCH /{id}`（请求含新 key 才更新密文，否则保留）；

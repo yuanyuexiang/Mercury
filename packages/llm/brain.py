@@ -1,5 +1,7 @@
 """Brain：编排层的 LLM 依赖聚合（triage / 受约束回答 / CRM 摘要），实现 domain 协议。"""
 
+from collections.abc import Awaitable, Callable
+
 from domain.config import Settings
 from domain.schemas import Deadline, RagAnswer, TriageResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,10 +15,18 @@ SUMMARY_TIMEOUT_S = 30.0
 
 
 class RagBrain:
-    def __init__(self, chat: ChatClient, embedder: Embedder, settings: Settings) -> None:
+    def __init__(
+        self,
+        chat: ChatClient,
+        embedder: Embedder,
+        settings: Settings,
+        branding: Callable[[], Awaitable[tuple[str, str]]] | None = None,
+    ) -> None:
         self._chat = chat
         self._embedder = embedder
         self._settings = settings
+        # 品牌/语气动态解析（后台可配）；未注入时用 env 静态值
+        self._branding = branding
 
     async def triage(self, history: list[dict[str, str]], deadline: Deadline) -> TriageResult:
         return await run_triage(self._chat, history, deadline)
@@ -29,6 +39,10 @@ class RagBrain:
         language: str,
         deadline: Deadline,
     ) -> RagAnswer:
+        if self._branding is not None:
+            brand_name, tone_hint = await self._branding()
+        else:
+            brand_name, tone_hint = self._settings.brand_name, self._settings.bot_tone_hint
         return await generate_answer(
             session,
             self._embedder,
@@ -39,8 +53,8 @@ class RagBrain:
             deadline,
             top_k=self._settings.rag_top_k,
             min_similarity=self._settings.rag_min_similarity,
-            brand_name=self._settings.brand_name,
-            tone_hint=self._settings.bot_tone_hint,
+            brand_name=brand_name,
+            tone_hint=tone_hint,
         )
 
 

@@ -12,5 +12,5 @@ router = APIRouter(prefix="/api/meta", tags=["meta"])
 
 @router.get("")
 async def meta(request: Request) -> dict[str, Any]:
-    settings = request.app.state.settings
-    return {"brand_name": settings.brand_name}
+    store = request.app.state.app_settings_store
+    return {"brand_name": await store.brand_name()}

@@ -51,6 +51,8 @@ def settings(redis_client) -> Settings:
 
 @pytest.fixture
 async def client(session_factory, redis_client, settings, sender):
+    from integrations.app_settings import AppSettingsStore
+
     app = create_app()
     app.state.settings = settings
     app.state.session_factory = session_factory
@@ -58,6 +60,16 @@ async def client(session_factory, redis_client, settings, sender):
     app.state.arq = StubArq()
     app.state.sender = sender
     app.state.chat_client_factory = lambda base_url, api_key, model: FakeTestChat(ok=True)
+    app.state.app_settings_store = AppSettingsStore(session_factory, redis_client, settings)
+
+    async def _fake_probe(token: str) -> str:
+        return "test_bot"
+
+    async def _fake_register(token: str, base_url: str, secret: str) -> None:
+        return None
+
+    app.state.telegram_probe = _fake_probe
+    app.state.telegram_register = _fake_register
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
         http.app = app  # type: ignore[attr-defined]
@@ -448,3 +460,74 @@ async def test_channel_attribution_in_metrics_and_export(client, session_factory
 
     text = (await client.get("/api/leads/export")).text
     assert "渠道" in text and "promo_yt" in text
+
+
+async def test_system_settings_telegram(client, session_factory, sender: FakeSender) -> None:
+    """系统设置（migration 0007）：token 验证→加密入库→脱敏回显→测试通知全链路。"""
+    await _login(client)
+    conf = (await client.get("/api/settings/telegram")).json()
+    assert conf["bot_token_source"] == "none" and conf["bot_token_masked"] == ""
+
+    # 未配置就发测试通知 → 422
+    resp = await client.post("/api/settings/telegram/test", headers=WRITE_HEADERS)
+    assert resp.status_code == 422
+
+    # 无效 token（probe 抛错）→ 422，不入库
+    async def _bad_probe(token: str) -> str:
+        raise ConnectionError("unauthorized")
+
+    client.app.state.telegram_probe = _bad_probe
+    resp = await client.put(
+        "/api/settings/telegram", json={"bot_token": "bad-token"}, headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 422
+
+    # 有效 token + chat_id → 保存；PUBLIC_BASE_URL 未配 → webhook skipped
+    async def _ok_probe(token: str) -> str:
+        return "mercury_demo_bot"
+
+    client.app.state.telegram_probe = _ok_probe
+    resp = await client.put(
+        "/api/settings/telegram",
+        json={"bot_token": "123456:ABCdef", "operator_chat_id": "4242"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"bot_username": "mercury_demo_bot", "webhook": "skipped"}
+
+    # 回显脱敏 + 来源 db；库里是 Fernet 密文不是明文
+    conf = (await client.get("/api/settings/telegram")).json()
+    assert conf["bot_token_masked"] == "****Cdef"
+    assert conf["bot_token_source"] == "db"
+    assert conf["operator_chat_id"] == "4242"
+    from domain.models import AppSetting
+
+    async with session_factory() as session:
+        row = await session.get(AppSetting, "telegram_bot_token")
+        assert row is not None and row.is_encrypted and row.value != "123456:ABCdef"
+
+    # 测试通知走当前配置发到 chat_id
+    resp = await client.post("/api/settings/telegram/test", headers=WRITE_HEADERS)
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    assert sender.sent[-1][0] == 4242
+
+    # 非数字 chat_id → 422
+    resp = await client.put(
+        "/api/settings/telegram", json={"operator_chat_id": "@abc"}, headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 422
+
+
+async def test_system_settings_general_reflects_in_meta(client) -> None:
+    """品牌后台可配：PUT general 后 /api/meta（免认证）立即返回新品牌。"""
+    await _login(client)
+    assert (await client.get("/api/meta")).json()["brand_name"] == ""
+    resp = await client.put(
+        "/api/settings/general",
+        json={"brand_name": "Acme", "bot_tone_hint": "Friendly"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    data = (await client.get("/api/settings/general")).json()
+    assert data == {"brand_name": "Acme", "bot_tone_hint": "Friendly"}
+    assert (await client.get("/api/meta")).json()["brand_name"] == "Acme"

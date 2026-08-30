@@ -34,6 +34,8 @@ export const api = {
     }),
   patch: <T>(path: string, data: unknown) =>
     request<T>(path, { method: "PATCH", headers: writeHeaders, body: JSON.stringify(data) }),
+  put: <T>(path: string, data: unknown) =>
+    request<T>(path, { method: "PUT", headers: writeHeaders, body: JSON.stringify(data) }),
   del: <T>(path: string) =>
     request<T>(path, { method: "DELETE", headers: { "X-Requested-With": "fetch" } }),
   upload: <T>(path: string, formData: FormData) =>

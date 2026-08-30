@@ -24,20 +24,19 @@ git push
 完成后验证：`curl https://mercury.asksquirrel.ai/health/ready` → `{"status":"ok"}`，
 后台 `https://mercury.asksquirrel.ai/login`（用户名 admin）。
 
-## 三、补齐两个凭据 + 后台配模型
+## 三、后台完成全部配置（无需再碰 .env）
 
-SSH 到服务器编辑 `~/mercury/.env`，只填两项：
+登录后台，两个页面配完即可开门迎客：
 
-```dotenv
-TELEGRAM_BOT_TOKEN=        # BotFather /newbot（见附录 1）
-OPERATOR_TELEGRAM_CHAT_ID= # 人工提醒发到哪（见附录 2）
-```
+1. **「系统设置」→ Telegram 对接**：填 Bot Token（BotFather 创建，见附录 1）和
+   通知接收 Chat ID（见附录 2）→ 「保存并验证」——系统自动校验 token 有效性并
+   **注册 webhook**，再点「发送测试通知」确认全链路。品牌名称/回复语气也在这页配。
+2. **「模型配置」**：新增供应商（base_url / key / 对话模型 / embedding 模型）→
+   测试 → 激活，即时生效。
 
-LLM 不进 .env：登录后台 → 「模型配置」→ 新增供应商（base_url / key / 对话模型 /
-embedding 模型）→ 测试 → 激活，即时生效。
-
-然后 Actions → Deploy → Run workflow 重新部署（镜像是私有的，拉取授权由 workflow 临时完成，所以统一走 Actions 触发）。
-重新部署会**自动注册 webhook**——之后 Telegram 里给 bot 发消息就通了。
+Token 以加密形式存库（主密钥在服务器 .env 的 `SETTINGS_ENCRYPTION_KEY`），改任何
+配置都**不需要重启或重新部署**。`.env` 里的 `TELEGRAM_BOT_TOKEN` /
+`OPERATOR_TELEGRAM_CHAT_ID` 仍可作为兜底（后台未配置时生效），但推荐统一走后台。
 
 ## 四、日常运维
 
@@ -48,6 +47,7 @@ embedding 模型）→ 测试 → 激活，即时生效。
 | 看日志 | 服务器 `cd ~/mercury && docker compose -f compose.prod.yaml logs -f api worker` |
 | 备份 | backup 服务每日 `pg_dump`，保留 14 份 |
 | 换模型/换 key | 后台「模型配置」，无需重启 |
+| 换 bot / 改通知人 / 改品牌 | 后台「系统设置」，保存自动验证并注册 webhook，无需重启 |
 | 改域名/环境 | 改 `deploy.yml` 顶部 env 四行 + 服务器 `.env` 对应项 |
 | 后台改密码 | 生成新 hash 替换 `.env` 的 `ADMIN_PASSWORD_HASH` 后重新部署 |
 | 删用户数据 | `DELETE /api/users/by-telegram/{id}`（需登录 + CSRF 头） |
@@ -83,8 +83,8 @@ Telegram 规定 bot 不能主动私聊没找过它的人，所以必须先发起
 
 ### 3. 注册 Webhook
 
-前提：服务已部署且 https 可达（Telegram 只接受 https）。`.env` 配好
-`TELEGRAM_BOT_TOKEN` / `TELEGRAM_WEBHOOK_SECRET` / `PUBLIC_BASE_URL` 后：
+**正常情况不需要手动做**：后台「系统设置」保存 Bot Token 时自动注册（要求服务已
+https 可达）。以下手动方式仅用于排障或纯 .env 流程：
 
 ```bash
 uv run python scripts/set_webhook.py
