@@ -285,11 +285,14 @@ async def test_provider_crud_roles_and_hot_reload(
     )
     assert resp.status_code == 200 and resp.json()["ok"] is True
 
-    # 激活中的不可删
+    # 在用的服务商也可删（前端弹窗确认后果）：删除即腾空两个槽位
     resp = await client.delete(
         f"/api/settings/llm-providers/{provider['id']}", headers=WRITE_HEADERS
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    source_after = ProviderSource(session_factory, redis_client, settings)
+    assert await source_after.get() is None  # env 未配置 → 对话降级"系统未就绪"
+    assert await source_after.get_embed() is None
 
 
 async def test_embedding_only_provider_cross_vendor(
@@ -375,11 +378,15 @@ async def test_embedding_only_provider_cross_vendor(
     body = resp.json()
     assert body["ok"] is False and "4096" in (body["error"] or "")
 
-    # 承担用途中的服务商不可删除
+    # 承担检索槽的服务商也可删：删除即腾空检索槽（对话槽不受影响）
     resp = await client.delete(
         f"/api/settings/llm-providers/{embed_provider['id']}", headers=WRITE_HEADERS
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    source_after = ProviderSource(session_factory, redis_client, settings)
+    assert await source_after.get_embed() is None
+    config_after = await source_after.get()
+    assert config_after is not None and config_after.chat_model == "glm-4.7"
 
 
 async def test_provider_source_env_fallback_and_invalidate(

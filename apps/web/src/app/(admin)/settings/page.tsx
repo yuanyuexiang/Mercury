@@ -1,10 +1,13 @@
 "use client";
-// 模型配置（§12 双槽位）：①服务商密钥 ②对话槽 ③检索槽。
-// 服务商只管 key；「谁来对话」「谁来检索」各自独立选择，可以不同家。
+// 模型配置工作台：微信式两栏（加全局侧边栏共三栏）——左=服务商列表（置顶「当前生效」），右=内容区。
+// 自动化三层：拉取模型列表自动分类（对话/检索分流下拉）→ 添加后自动预填推荐模型 → 保存自动实测（检索含 1536 维校验）。
 import {
   CheckCircleFilled,
   CloseCircleFilled,
+  MessageOutlined,
   PlusOutlined,
+  SearchOutlined,
+  SettingOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
@@ -15,6 +18,7 @@ import {
   Checkbox,
   Col,
   Collapse,
+  Empty,
   Form,
   Input,
   Modal,
@@ -22,16 +26,19 @@ import {
   Row,
   Select,
   Space,
-  Table,
   Tag,
   Typography,
 } from "antd";
 import { useCallback, useEffect, useState } from "react";
 
-import PageHeader from "@/components/PageHeader";
 import { api, ApiError } from "@/lib/api";
-import { PROVIDER_PRESETS, type ProviderPreset } from "@/lib/providers";
-import { fromNow } from "@/lib/ui";
+import {
+  classifyModels,
+  type ClassifiedModels,
+  PROVIDER_PRESETS,
+  type ProviderPreset,
+} from "@/lib/providers";
+import { avatarColor, fromNow, initialOf } from "@/lib/ui";
 
 interface Provider {
   id: number;
@@ -56,6 +63,25 @@ interface CostRow {
   calls: number;
 }
 
+const panelBorder = "1px solid #e2e8f0";
+
+const presetFor = (p?: Provider | null): ProviderPreset | undefined =>
+  p ? PROVIDER_PRESETS.find((x) => x.base_url === p.base_url) : undefined;
+
+function TestStatus({ p }: { p: Provider }) {
+  if (!p.last_test_at)
+    return <span style={{ color: "#cbd5e1", fontSize: 12.5 }}>未测试</span>;
+  return p.last_test_ok ? (
+    <span style={{ color: "#52C41A", fontSize: 12.5 }}>
+      <CheckCircleFilled /> 连接正常 · {fromNow(p.last_test_at)}
+    </span>
+  ) : (
+    <span style={{ color: "#F5222D", fontSize: 12.5 }}>
+      <CloseCircleFilled /> 连接失败 · {fromNow(p.last_test_at)}
+    </span>
+  );
+}
+
 function UsageCard() {
   const [costs, setCosts] = useState<CostRow[]>([]);
 
@@ -71,15 +97,11 @@ function UsageCard() {
   const maxTokens = Math.max(1, ...days.map(([, v]) => v));
 
   return (
-    <Card
-      title="模型用量（Token / 日，近 14 天）"
-      style={{ marginTop: 16 }}
-      styles={{ body: { paddingTop: 12 } }}
-    >
+    <Card title="模型用量（Token / 日，近 14 天）" size="small" style={{ marginTop: 16 }}>
       {days.length === 0 ? (
         <Typography.Text type="secondary">暂无调用记录</Typography.Text>
       ) : (
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 120 }}>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 100 }}>
           {days.map(([day, tokens]) => (
             <div
               key={day}
@@ -110,81 +132,165 @@ function UsageCard() {
   );
 }
 
-const presetFor = (p?: Provider): ProviderPreset | undefined =>
-  p ? PROVIDER_PRESETS.find((x) => x.base_url === p.base_url) : undefined;
-
-// 用途槽位卡片：选服务商 → 选模型 → 保存并生效（保存后自动做连接测试）
-function RoleCard({
-  role,
+// ---------- 内容区：当前生效总览 ----------
+function OverviewPanel({
   providers,
+  onSelect,
+  onAdd,
+}: {
+  providers: Provider[];
+  onSelect: (id: number) => void;
+  onAdd: () => void;
+}) {
+  const chatHolder = providers.find((p) => p.is_active);
+  const embedHolder = providers.find((p) => p.is_embed_active);
+
+  const slotCard = (
+    icon: React.ReactNode,
+    title: string,
+    subtitle: string,
+    holder: Provider | undefined,
+    model: string,
+  ) => (
+    <Card size="small" styles={{ body: { minHeight: 118 } }}>
+      <Space size={8} style={{ marginBottom: 8 }}>
+        {icon}
+        <span style={{ fontWeight: 600 }}>{title}</span>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {subtitle}
+        </Typography.Text>
+      </Space>
+      {holder ? (
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>
+            {holder.name} · {model}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <TestStatus p={holder} />
+            <Button size="small" onClick={() => onSelect(holder.id)}>
+              调整
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <Typography.Text type="warning">未配置</Typography.Text>
+          <div style={{ marginTop: 8 }}>
+            {providers.length ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
+                在左侧点一家服务商进行配置
+              </Typography.Text>
+            ) : (
+              <Button size="small" type="primary" icon={<PlusOutlined />} onClick={onAdd}>
+                添加服务商
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+
+  return (
+    <div>
+      <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 4 }}>
+        当前生效
+      </Typography.Title>
+      <Typography.Paragraph type="secondary" style={{ fontSize: 12.5, marginBottom: 16 }}>
+        机器人现在用谁干活。对话和检索可以来自不同服务商——在左侧选一家进行配置。
+      </Typography.Paragraph>
+      <Row gutter={12}>
+        <Col xs={24} xl={12} style={{ marginBottom: 12 }}>
+          {slotCard(
+            <MessageOutlined style={{ color: "#2F54EB" }} />,
+            "对话模型",
+            "回答客户的消息",
+            chatHolder,
+            chatHolder?.chat_model ?? "",
+          )}
+        </Col>
+        <Col xs={24} xl={12} style={{ marginBottom: 12 }}>
+          {slotCard(
+            <SearchOutlined style={{ color: "#722ED1" }} />,
+            "知识库检索模型",
+            "搜索知识库（embedding）",
+            embedHolder,
+            embedHolder?.embed_model ?? "",
+          )}
+        </Col>
+      </Row>
+      <UsageCard />
+    </div>
+  );
+}
+
+// ---------- 内容区：服务商详情（密钥 + 两个用途配置块） ----------
+function RoleBlock({
+  role,
+  provider,
+  classified,
   onSaved,
 }: {
   role: "chat" | "embed";
-  providers: Provider[];
+  provider: Provider;
+  classified: ClassifiedModels | null;
   onSaved: () => Promise<void>;
 }) {
   const { message } = App.useApp();
-  const current = providers.find((p) => (role === "chat" ? p.is_active : p.is_embed_active));
-  const currentModel = (role === "chat" ? current?.chat_model : current?.embed_model) ?? "";
+  const holds = role === "chat" ? provider.is_active : provider.is_embed_active;
+  const heldModel = (role === "chat" ? provider.chat_model : provider.embed_model) ?? "";
+  const preset = presetFor(provider);
+  const recommended = (role === "chat" ? preset?.chat_model : preset?.embed_model) ?? "";
 
-  const [providerId, setProviderId] = useState<number | undefined>(current?.id);
-  const [model, setModel] = useState<string>(currentModel);
-  const [fallback, setFallback] = useState<string>(current?.fallback_model ?? "");
-  const [models, setModels] = useState<string[]>([]);
-  const [fetching, setFetching] = useState(false);
+  const [model, setModel] = useState<string>(heldModel || recommended);
   const [saving, setSaving] = useState(false);
 
-  const selected = providers.find((p) => p.id === providerId);
-  const dirty =
-    providerId !== current?.id ||
-    model !== currentModel ||
-    (role === "chat" && fallback !== (current?.fallback_model ?? ""));
+  // 自动预填：分类结果就绪后，空输入自动填（推荐优先，其次分类命中的第一个）
+  useEffect(() => {
+    if (model || !classified) return;
+    const pool = role === "chat" ? classified.chat : classified.embed;
+    if (recommended) setModel(recommended);
+    else if (pool.length) setModel(pool[0]);
+  }, [classified, model, recommended, role]);
 
-  const pickProvider = (id: number) => {
-    setProviderId(id);
-    setModels([]);
-    const preset = presetFor(providers.find((p) => p.id === id));
-    const recommended = role === "chat" ? preset?.chat_model : preset?.embed_model;
-    setModel(recommended || "");
-  };
-
-  const fetchModels = async () => {
-    if (!providerId) return;
-    setFetching(true);
-    try {
-      const data = await api.post<{ items: string[] }>("/api/settings/llm-providers/models", {
-        provider_id: providerId,
+  const options: { label: string; options: { value: string }[] }[] = [];
+  if (classified) {
+    const pool = role === "chat" ? classified.chat : classified.embed;
+    if (recommended && !pool.includes(recommended))
+      options.push({ label: "推荐", options: [{ value: recommended }] });
+    if (pool.length)
+      options.push({
+        label: role === "chat" ? "对话模型" : "检索模型（embedding）",
+        options: pool.map((m) => ({
+          value: m,
+          ...(m === recommended ? { label: `${m}（推荐）` } : {}),
+        })),
       });
-      setModels(data.items);
-      message.success(`拉取到 ${data.items.length} 个模型，输入框已变为可搜索下拉`);
-    } catch (e) {
-      message.error(e instanceof ApiError ? e.message : "拉取失败");
-    } finally {
-      setFetching(false);
-    }
-  };
+    if (classified.other.length)
+      options.push({ label: "其他", options: classified.other.map((m) => ({ value: m })) });
+  } else if (recommended) {
+    options.push({ label: "推荐", options: [{ value: recommended }] });
+  }
+
+  const inEffect = holds && model.trim() === heldModel;
 
   const save = async () => {
-    if (!providerId || !model.trim()) {
-      message.info("请先选择服务商和模型");
+    if (!model.trim()) {
+      message.info("请先选择模型");
       return;
     }
     setSaving(true);
     try {
       await api.put(`/api/settings/llm-providers/roles/${role}`, {
-        provider_id: providerId,
+        provider_id: provider.id,
         model: model.trim(),
-        ...(role === "chat" ? { fallback_model: fallback } : {}),
       });
       const test = await api.post<{ ok: boolean; error: string | null }>(
-        `/api/settings/llm-providers/${providerId}/test`,
+        `/api/settings/llm-providers/${provider.id}/test`,
         {},
       );
-      if (test.ok) {
-        message.success("已保存并生效，连接正常");
-      } else {
-        message.warning(`已保存，但连接测试失败：${test.error ?? "未知错误"}`, 8);
-      }
+      if (test.ok) message.success("已生效，连接正常");
+      else message.warning(`已生效，但连接测试失败：${test.error ?? "未知错误"}`, 8);
       await onSaved();
     } catch (e) {
       message.error(e instanceof ApiError ? e.message : "保存失败");
@@ -193,142 +299,191 @@ function RoleCard({
     }
   };
 
-  const meta =
-    role === "chat"
-      ? { step: "第二步", title: "对话模型", subtitle: "谁来回答客户的消息" }
-      : { step: "第三步", title: "知识库检索模型", subtitle: "谁来搜索知识库（embedding）" };
-
   return (
-    <Card
-      title={
+    <div
+      style={{
+        border: panelBorder,
+        borderRadius: 10,
+        padding: "14px 16px",
+        marginBottom: 12,
+        background: holds ? "#F6FFED" : undefined,
+        borderColor: holds ? "#B7EB8F" : undefined,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
         <Space size={8}>
-          <Tag color="blue" style={{ marginRight: 0 }}>
-            {meta.step}
-          </Tag>
-          {meta.title}
-          <Typography.Text type="secondary" style={{ fontSize: 12.5, fontWeight: 400 }}>
-            {meta.subtitle}
+          {role === "chat" ? (
+            <MessageOutlined style={{ color: "#2F54EB" }} />
+          ) : (
+            <SearchOutlined style={{ color: "#722ED1" }} />
+          )}
+          <span style={{ fontWeight: 600 }}>
+            {role === "chat" ? "对话模型" : "知识库检索模型"}
+          </span>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {role === "chat" ? "回答客户的消息" : "搜索知识库（embedding）"}
           </Typography.Text>
         </Space>
-      }
-      styles={{ body: { paddingTop: 16 } }}
-    >
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <div>
-          <div style={{ fontSize: 13, marginBottom: 6 }}>服务商</div>
-          <Select
-            style={{ width: "100%" }}
-            placeholder={providers.length ? "选择一家服务商" : "请先在上方添加服务商"}
-            disabled={!providers.length}
-            value={providerId}
-            onChange={pickProvider}
-            options={providers.map((p) => ({ value: p.id, label: p.name }))}
-          />
-        </div>
-        <div>
-          <div style={{ fontSize: 13, marginBottom: 6 }}>
-            模型{" "}
-            <Button
-              size="small"
-              type="link"
-              loading={fetching}
-              disabled={!providerId}
-              onClick={fetchModels}
-              style={{ padding: 0 }}
-            >
-              拉取模型列表
-            </Button>
-          </div>
-          <AutoComplete
-            style={{ width: "100%" }}
-            value={model}
-            onChange={setModel}
-            options={models.map((m) => ({ value: m }))}
-            placeholder={
-              role === "chat" ? "如 glm-4.7 / deepseek-chat" : "如 Qwen/Qwen3-Embedding-8B"
-            }
-            filterOption={(input, option) =>
-              (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-            }
-          />
-        </div>
-        {role === "chat" && (
-          <Collapse
-            ghost
-            items={[
-              {
-                key: "fallback",
-                label: (
-                  <span style={{ fontSize: 12.5, color: "#64748b" }}>
-                    高级：备用模型（主模型故障时顶上）
-                  </span>
-                ),
-                children: (
-                  <AutoComplete
-                    style={{ width: "100%" }}
-                    value={fallback}
-                    onChange={setFallback}
-                    options={models.map((m) => ({ value: m }))}
-                    placeholder="留空 = 不用备用"
-                    filterOption={(input, option) =>
-                      (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-                    }
-                  />
-                ),
-              },
-            ]}
-          />
-        )}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <span style={{ fontSize: 12.5 }}>
-            {!current && !dirty && <Typography.Text type="secondary">尚未配置</Typography.Text>}
-            {current && !dirty && current.last_test_ok === true && (
-              <span style={{ color: "#52C41A" }}>
-                <CheckCircleFilled /> 生效中 · 连接正常 · {fromNow(current.last_test_at)}
-              </span>
-            )}
-            {current && !dirty && current.last_test_ok === false && (
-              <span style={{ color: "#F5222D" }}>
-                <CloseCircleFilled /> 生效中 · 连接异常 · {fromNow(current.last_test_at)}
-              </span>
-            )}
-            {current && !dirty && current.last_test_ok == null && (
-              <Typography.Text type="secondary">生效中 · 未测试</Typography.Text>
-            )}
-            {dirty && <Typography.Text type="warning">修改未保存</Typography.Text>}
-          </span>
-          <Button
-            type="primary"
-            icon={<ThunderboltOutlined />}
-            loading={saving}
-            disabled={!providerId || !model.trim() || (!dirty && !!current)}
-            onClick={save}
-          >
-            保存并生效
-          </Button>
-        </div>
-        {role === "embed" && (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            ⚠ 更换检索模型后，需到「知识库」对所有文档重建索引（首次配置无需操作）。
-            保存时会自动校验模型能否输出 1536 维向量，不合适会直接报错。
-          </Typography.Text>
-        )}
-        {role === "chat" && selected && presetFor(selected)?.note && (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            💡 {presetFor(selected)?.note}
-          </Typography.Text>
-        )}
-      </Space>
-    </Card>
+        {holds && <Tag color="green">这家正在承担此用途</Tag>}
+      </div>
+      <Space.Compact style={{ width: "100%" }}>
+        <AutoComplete
+          style={{ flex: 1 }}
+          value={model}
+          onChange={setModel}
+          options={options}
+          placeholder={
+            classified
+              ? role === "chat"
+                ? "选择或输入对话模型"
+                : "选择或输入检索模型"
+              : "正在拉取模型列表…也可直接输入"
+          }
+          filterOption={(input, option) =>
+            String((option as { value?: string } | undefined)?.value ?? "")
+              .toLowerCase()
+              .includes(input.toLowerCase())
+          }
+        />
+        <Button
+          type={inEffect ? "default" : "primary"}
+          icon={<ThunderboltOutlined />}
+          loading={saving}
+          disabled={inEffect || !model.trim()}
+          onClick={save}
+        >
+          {inEffect ? "当前生效" : holds ? "保存变更" : "设为" + (role === "chat" ? "对话" : "检索")}
+        </Button>
+      </Space.Compact>
+      {role === "embed" && (
+        <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+          保存时自动校验能否输出 1536 维；更换检索模型后需到「知识库」重建索引（首次配置不用管）。
+        </Typography.Text>
+      )}
+    </div>
   );
 }
 
+function ProviderPanel({
+  provider,
+  onChanged,
+  onDeleted,
+  onEdit,
+}: {
+  provider: Provider;
+  onChanged: () => Promise<void>;
+  onDeleted: () => Promise<void>;
+  onEdit: () => void;
+}) {
+  const { message } = App.useApp();
+  const [classified, setClassified] = useState<ClassifiedModels | null>(null);
+  const [testing, setTesting] = useState(false);
+  const preset = presetFor(provider);
+  const inUse = provider.is_active || provider.is_embed_active;
+
+  // 自动：进入即拉取模型列表并分类（失败不阻塞，可手输）
+  useEffect(() => {
+    let cancelled = false;
+    setClassified(null);
+    api
+      .post<{ items: string[] }>("/api/settings/llm-providers/models", {
+        provider_id: provider.id,
+      })
+      .then((d) => {
+        if (!cancelled) setClassified(classifyModels(d.items));
+      })
+      .catch(() => {
+        if (!cancelled) setClassified({ chat: [], embed: [], other: [] });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [provider.id]);
+
+  const test = async () => {
+    setTesting(true);
+    try {
+      const r = await api.post<{ ok: boolean; error: string | null }>(
+        `/api/settings/llm-providers/${provider.id}/test`,
+        {},
+      );
+      if (r.ok) message.success("连接正常");
+      else message.error(`测试失败：${r.error ?? "未知错误"}`, 8);
+      await onChanged();
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "测试失败");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const remove = async () => {
+    try {
+      await api.del(`/api/settings/llm-providers/${provider.id}`);
+      message.success("已删除");
+      await onDeleted();
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "删除失败");
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 2 }}>
+            {provider.name}
+          </Typography.Title>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {provider.base_url}
+          </Typography.Text>
+        </div>
+        <Space>
+          <Button size="small" loading={testing} onClick={test}>
+            测试
+          </Button>
+          <Button size="small" onClick={onEdit}>
+            编辑
+          </Button>
+          <Popconfirm
+            title={inUse ? "该服务商正在担任用途" : "确认删除该服务商？"}
+            description={
+              inUse
+                ? "删除后对应功能（对话/检索）将停用，直到你重新配置。确认删除？"
+                : undefined
+            }
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            onConfirm={remove}
+          >
+            <Button size="small" danger>
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
+      </div>
+      <div style={{ margin: "10px 0 16px", display: "flex", gap: 16, alignItems: "center" }}>
+        <span style={{ fontSize: 12.5, color: "#64748b" }}>密钥 {provider.api_key_masked}</span>
+        <TestStatus p={provider} />
+      </div>
+      {preset?.note && (
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 14 }}>
+          💡 {preset.note}
+        </Typography.Paragraph>
+      )}
+      <RoleBlock role="chat" provider={provider} classified={classified} onSaved={onChanged} />
+      <RoleBlock role="embed" provider={provider} classified={classified} onSaved={onChanged} />
+    </div>
+  );
+}
+
+// ---------- 页面 ----------
 export default function SettingsPage() {
   const { message } = App.useApp();
   const [providers, setProviders] = useState<Provider[]>([]);
+  const [selected, setSelected] = useState<"overview" | number>("overview");
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Provider | null>(null);
-  const [testing, setTesting] = useState<number | null>(null);
   const [preset, setPreset] = useState<ProviderPreset | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [form] = Form.useForm();
@@ -336,11 +491,21 @@ export default function SettingsPage() {
   const load = useCallback(async () => {
     const data = await api.get<{ items: Provider[] }>("/api/settings/llm-providers");
     setProviders(data.items);
+    return data.items;
   }, []);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("id");
+    if (id) setSelected(Number(id));
     load();
   }, [load]);
+
+  const select = (key: "overview" | number) => {
+    setSelected(key);
+    const qs = key === "overview" ? "" : `?id=${key}`;
+    window.history.replaceState(null, "", `/settings${qs}`);
+  };
 
   const openModal = (provider: Provider | null) => {
     setEditing(provider);
@@ -356,170 +521,177 @@ export default function SettingsPage() {
       if (editing) {
         if (!values.api_key) delete values.api_key; // 留空保留原密文
         await api.patch(`/api/settings/llm-providers/${editing.id}`, values);
+        message.success("已保存");
+        setModalOpen(false);
+        await load();
       } else {
-        await api.post("/api/settings/llm-providers", values);
+        const created = await api.post<{ id: number }>("/api/settings/llm-providers", values);
+        message.success("已添加——已自动拉取模型并填好推荐，确认后点「设为对话/检索」即可");
+        setModalOpen(false);
+        await load();
+        select(created.id); // 自动跳到新服务商，进入自动预填流程
       }
-      message.success("已保存");
-      setModalOpen(false);
-      await load();
     } catch (e) {
       message.error(e instanceof ApiError ? e.message : "保存失败");
     }
   };
 
-  const test = async (id: number) => {
-    setTesting(id);
-    try {
-      const r = await api.post<{ ok: boolean; error: string | null }>(
-        `/api/settings/llm-providers/${id}/test`,
-        {},
-      );
-      if (r.ok) message.success("连接正常");
-      else message.error(`测试失败：${r.error ?? "未知错误"}`, 8);
-      await load();
-    } catch (e) {
-      message.error(e instanceof ApiError ? e.message : "测试失败");
-    } finally {
-      setTesting(null);
-    }
-  };
-
-  const chatCurrent = providers.find((p) => p.is_active);
-  const embedCurrent = providers.find((p) => p.is_embed_active);
+  const current = typeof selected === "number" ? providers.find((p) => p.id === selected) : null;
 
   return (
-    <div>
-      <PageHeader
-        title="模型配置"
-        subtitle="三步配完：添加服务商密钥 → 选对话模型 → 选检索模型；对话和检索可以来自不同服务商"
-        extra={
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => openModal(null)}>
-            添加服务商
-          </Button>
-        }
-      />
-
-      <Card
-        title={
-          <Space size={8}>
-            <Tag color="blue" style={{ marginRight: 0 }}>
-              第一步
-            </Tag>
-            服务商与密钥
-            <Typography.Text type="secondary" style={{ fontSize: 12.5, fontWeight: 400 }}>
-              把要用的每家服务商的 API Key 存进来
-            </Typography.Text>
-          </Space>
-        }
-        styles={{ body: { paddingTop: 8 } }}
+    <div
+      style={{
+        display: "flex",
+        height: "calc(100vh - 90px)",
+        background: "#fff",
+        border: panelBorder,
+        borderRadius: 12,
+        overflow: "hidden",
+        boxShadow: "0 1px 3px rgba(15,23,42,0.05)",
+      }}
+    >
+      {/* ---------- 左栏：服务商列表 ---------- */}
+      <div
+        style={{
+          width: 240,
+          flexShrink: 0,
+          borderRight: panelBorder,
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+        }}
       >
-        <Table<Provider>
-          size="middle"
-          rowKey="id"
-          dataSource={providers}
-          pagination={false}
-          locale={{ emptyText: "还没有服务商——点右上角「添加服务商」，选一家、贴上 Key 即可" }}
-          columns={[
-            {
-              title: "服务商",
-              render: (_, p) => (
-                <div>
-                  <div style={{ fontWeight: 600 }}>{p.name}</div>
-                  <div style={{ fontSize: 12, color: "#94a3b8" }}>{p.base_url}</div>
+        <div style={{ padding: "14px 14px 10px", borderBottom: panelBorder }}>
+          <span style={{ fontWeight: 600, fontSize: 15 }}>模型配置</span>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          {/* 置顶：当前生效 */}
+          <div
+            onClick={() => select("overview")}
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+              padding: "12px 14px",
+              cursor: "pointer",
+              borderBottom: panelBorder,
+              background: selected === "overview" ? "#EEF2FF" : undefined,
+            }}
+          >
+            <SettingOutlined style={{ fontSize: 18, color: "#2F54EB" }} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>当前生效</div>
+              <div style={{ fontSize: 11.5, color: "#94a3b8" }}>机器人现在用谁干活</div>
+            </div>
+          </div>
+          {providers.map((p) => {
+            const active = selected === p.id;
+            return (
+              <div
+                key={p.id}
+                onClick={() => select(p.id)}
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  padding: "11px 14px",
+                  cursor: "pointer",
+                  background: active ? "#EEF2FF" : undefined,
+                  alignItems: "center",
+                }}
+              >
+                <div
+                  style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: 8,
+                    flexShrink: 0,
+                    background: avatarColor(p.id),
+                    color: "#fff",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontWeight: 600,
+                  }}
+                >
+                  {initialOf(p.name)}
                 </div>
-              ),
-            },
-            { title: "密钥", dataIndex: "api_key_masked", width: 100 },
-            {
-              title: "当前用途",
-              width: 150,
-              render: (_, p) => (
-                <Space size={4}>
-                  {p.is_active && <Tag color="blue">对话中</Tag>}
-                  {p.is_embed_active && <Tag color="purple">检索中</Tag>}
-                  {!p.is_active && !p.is_embed_active && (
-                    <span style={{ color: "#cbd5e1", fontSize: 12.5 }}>未使用</span>
-                  )}
-                </Space>
-              ),
-            },
-            {
-              title: "连接",
-              width: 140,
-              render: (_, p) =>
-                p.last_test_at ? (
-                  p.last_test_ok ? (
-                    <span style={{ color: "#52C41A", fontSize: 12.5 }}>
-                      <CheckCircleFilled /> 正常 · {fromNow(p.last_test_at)}
-                    </span>
-                  ) : (
-                    <span style={{ color: "#F5222D", fontSize: 12.5 }}>
-                      <CloseCircleFilled /> 失败 · {fromNow(p.last_test_at)}
-                    </span>
-                  )
-                ) : (
-                  <span style={{ color: "#cbd5e1", fontSize: 12.5 }}>未测试</span>
-                ),
-            },
-            {
-              title: "操作",
-              width: 180,
-              render: (_, p) => (
-                <Space>
-                  <Button size="small" loading={testing === p.id} onClick={() => test(p.id)}>
-                    测试
-                  </Button>
-                  <Button size="small" type="text" onClick={() => openModal(p)}>
-                    编辑
-                  </Button>
-                  <Popconfirm
-                    title="确认删除该服务商？"
-                    onConfirm={async () => {
-                      try {
-                        await api.del(`/api/settings/llm-providers/${p.id}`);
-                        await load();
-                      } catch (e) {
-                        message.error(e instanceof ApiError ? e.message : "删除失败");
-                      }
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div
+                    style={{
+                      fontSize: 13.5,
+                      fontWeight: 600,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
                     }}
                   >
-                    <Button
-                      size="small"
-                      type="text"
-                      danger
-                      disabled={p.is_active || p.is_embed_active}
-                    >
-                      删除
-                    </Button>
-                  </Popconfirm>
-                </Space>
-              ),
-            },
-          ]}
-        />
-      </Card>
+                    {p.name}
+                  </div>
+                  <div style={{ display: "flex", gap: 4, marginTop: 2, alignItems: "center" }}>
+                    {p.is_active && (
+                      <Tag color="blue" style={{ fontSize: 10, lineHeight: "16px", margin: 0 }}>
+                        对话
+                      </Tag>
+                    )}
+                    {p.is_embed_active && (
+                      <Tag color="purple" style={{ fontSize: 10, lineHeight: "16px", margin: 0 }}>
+                        检索
+                      </Tag>
+                    )}
+                    {!p.is_active && !p.is_embed_active && (
+                      <span style={{ fontSize: 11, color: "#cbd5e1" }}>未使用</span>
+                    )}
+                    {p.last_test_at && (
+                      <span
+                        style={{
+                          width: 7,
+                          height: 7,
+                          borderRadius: "50%",
+                          background: p.last_test_ok ? "#52C41A" : "#F5222D",
+                          marginLeft: "auto",
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ padding: 10, borderTop: panelBorder }}>
+          <Button block icon={<PlusOutlined />} onClick={() => openModal(null)}>
+            添加服务商
+          </Button>
+        </div>
+      </div>
 
-      <Row gutter={16} style={{ marginTop: 16 }}>
-        <Col xs={24} lg={12} style={{ marginBottom: 16 }}>
-          <RoleCard
-            key={`chat-${chatCurrent?.id ?? 0}-${chatCurrent?.chat_model ?? ""}-${chatCurrent?.fallback_model ?? ""}`}
-            role="chat"
-            providers={providers}
-            onSaved={load}
+      {/* ---------- 内容区 ---------- */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px", minWidth: 0 }}>
+        {selected === "overview" ? (
+          <OverviewPanel providers={providers} onSelect={select} onAdd={() => openModal(null)} />
+        ) : current ? (
+          <ProviderPanel
+            key={current.id}
+            provider={current}
+            onChanged={async () => {
+              await load();
+            }}
+            onDeleted={async () => {
+              await load();
+              select("overview");
+            }}
+            onEdit={() => openModal(current)}
           />
-        </Col>
-        <Col xs={24} lg={12} style={{ marginBottom: 16 }}>
-          <RoleCard
-            key={`embed-${embedCurrent?.id ?? 0}-${embedCurrent?.embed_model ?? ""}`}
-            role="embed"
-            providers={providers}
-            onSaved={load}
+        ) : (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="服务商不存在或已删除"
+            style={{ marginTop: 80 }}
           />
-        </Col>
-      </Row>
+        )}
+      </div>
 
-      <UsageCard />
-
+      {/* ---------- 添加 / 编辑服务商弹窗 ---------- */}
       <Modal
         title={editing ? `编辑：${editing.name}` : "添加服务商"}
         open={modalOpen}
@@ -566,9 +738,11 @@ export default function SettingsPage() {
           >
             <Input.Password placeholder="sk-…" />
           </Form.Item>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            保存后，到下方「对话模型」「知识库检索模型」里选用这家服务商。
-          </Typography.Text>
+          {!editing && (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              保存后自动拉取模型列表、自动分类并填好推荐模型，你只需确认生效。
+            </Typography.Text>
+          )}
 
           <Collapse
             ghost

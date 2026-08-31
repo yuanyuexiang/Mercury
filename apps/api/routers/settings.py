@@ -286,22 +286,26 @@ async def test_provider(request: Request, provider_id: int) -> dict[str, Any]:
 
 @router.delete("/{provider_id}", dependencies=AdminWrite)
 async def delete_provider(request: Request, provider_id: int) -> dict[str, bool]:
+    """删除服务商。在用（担任槽位）的也可删——删除即腾空槽位（前端确认弹窗说明后果）；
+    对话槽空缺时机器人走"系统未就绪"降级回复，env 兜底配置仍可接管。"""
     async with request.app.state.session_factory() as session:
         provider = await session.get(LlmProvider, provider_id)
         if provider is None:
             raise HTTPException(status_code=404)
-        if provider.is_active or provider.is_embed_active:
-            raise HTTPException(
-                status_code=409, detail="该服务商正承担对话或检索用途，请先在槽位中换成别家"
-            )
         await repositories.add_audit(
             session,
             "admin",
             "provider_deleted",
             "llm_provider",
             provider.id,
-            {"name": provider.name},
+            {
+                "name": provider.name,
+                "held_chat": provider.is_active,
+                "held_embed": provider.is_embed_active,
+            },
         )
         await session.delete(provider)
         await session.commit()
+    # 槽位标志随行删除自动腾空；广播失效让 api/worker 立即重解析
+    await publish_invalidation(request.app.state.redis)
     return {"ok": True}

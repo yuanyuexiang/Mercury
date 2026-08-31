@@ -77,3 +77,33 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     note: "阿里云生态，qwen 系列",
   },
 ];
+
+// ---------- 模型自动分类（拉取列表后把对话/检索模型分流到对应下拉，选错变成不可能） ----------
+// 命名惯例识别：embedding 家族关键词 → 检索；语音/图像/重排等一律排除；其余按对话处理。
+// 分类拿不准的模型进「其他」分组垫底展示（不隐藏，防误杀冷门模型）；
+// 真正的兜底不靠猜名字：保存槽位时会真实调用验证（检索槽含 1536 维实测）。
+const EMBED_PATTERNS = [/embed/i, /(^|[/-])bge-/i, /(^|[/-])gte-/i, /(^|[/-])e5-/i, /m3e/i, /(^|[/-])bce-/i];
+const EXCLUDE_PATTERNS = [
+  /rerank/i,
+  /whisper/i,
+  /(^|[/-])tts(\b|[/-])/i,
+  /speech|audio|voice|transcribe/i,
+  /dall-e|midjourney|flux|stable-diffusion|(^|[/-])sd[0-9]|image|video/i,
+  /moderation/i,
+];
+
+export interface ClassifiedModels {
+  chat: string[];
+  embed: string[];
+  other: string[];
+}
+
+export function classifyModels(ids: string[]): ClassifiedModels {
+  const out: ClassifiedModels = { chat: [], embed: [], other: [] };
+  for (const id of ids) {
+    if (EMBED_PATTERNS.some((re) => re.test(id))) out.embed.push(id);
+    else if (EXCLUDE_PATTERNS.some((re) => re.test(id))) out.other.push(id);
+    else out.chat.push(id);
+  }
+  return out;
+}
