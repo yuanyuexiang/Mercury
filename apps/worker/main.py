@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from worker.tasks.extract_lead import extract_lead
 from worker.tasks.index_document import index_document
 from worker.tasks.process_update import process_update
+from worker.tasks.revive import revive_sleeping_leads
 from worker.tasks.sweeper import retention_cleanup, sweep
 from worker.tasks.sync_lead import sync_lead
 
@@ -76,6 +77,8 @@ class WorkerSettings:
     cron_jobs = [
         cron(sweep, second=0),  # 每分钟一次（§6 兜底扫描器）
         cron(retention_cleanup, hour=4, minute=0),  # 每日数据保留期清理（§14）
+        # 沉睡线索唤醒：每日 UTC 02:30（北京 10:30，工作时间不深夜打扰）
+        cron(revive_sleeping_leads, hour=2, minute=30),
     ]
     on_startup = on_startup
     on_shutdown = on_shutdown

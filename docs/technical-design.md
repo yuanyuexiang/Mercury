@@ -577,6 +577,22 @@ ai_active ──user_request/sensitive/manual──▶ handoff_pending ──管
 
 ---
 
+### 11.5 沉睡线索唤醒（migration 0008）
+
+每日 cron（UTC 02:30，北京 10:30——工作时间不深夜打扰）执行 `run_revive_leads`：
+对**安静 ≥ REVIVE_AFTER_DAYS（默认 3）天**的线索发一条确定性跟进文案（`texts.revive_follow_up`，
+品牌注入，不走 LLM——绝不编造承诺）。
+
+克制约束（全部必须满足才发）：lead.status=open、grade ∈ {medium, high}、
+会话 status=ai_active（human_active/closed 绝不打扰，§9）、`revive_count < REVIVE_MAX_ATTEMPTS`
+（默认 1，持久计数防骚扰）。发送后写 outbound message（sender_type=system）、
+revive_count+1、last_revived_at、audit，并 touch last_message_at（自然进入下一轮沉睡判定）。
+逐条独立事务，单条失败不影响其余。开关/天数/次数在后台「系统设置 → 自动跟进」配置（app_settings，DB 优先 env 兜底，`GET/PUT /api/settings/revive`）。
+合规性：Telegram 允许 bot 向主动发起过对话的用户发消息；主动群发/抓取群成员仍是红线（§4）。
+
+---
+
+
 ## 12. LLM 抽象层（packages/llm/client.py）
 
 - 基于 `openai` SDK。配置经 `ProviderConfigSource` 协议解析，优先级：**DB 激活供应商（llm_providers.is_active）→ env 兜底**（`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_CHAT_MODEL`/`LLM_CHAT_MODEL_FALLBACK`）。M1–M7 只有 `EnvConfigSource`；M8 加 `DbConfigSource`：进程内缓存 60s + 激活/修改时 Redis pub/sub 广播失效，worker 无需重启即热切换。

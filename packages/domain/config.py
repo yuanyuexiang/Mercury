@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     bot_tone_hint: str = ""  # 回复语气提示，如 "Friendly and concise, use emojis sparingly"
     scoring_overrides: str = ""  # 评分规则覆盖 JSON，见 domain/scoring.py config_from_json
 
+    # 沉睡线索唤醒的兜底默认——实际配置在后台「系统设置」（app_settings，DB 优先）
+    revive_enabled: bool = True
+    revive_after_days: int = 3
+    revive_max_attempts: int = 1
+
     # 运行
     log_level: str = "INFO"
     data_retention_days: int = 180

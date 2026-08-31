@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Literal, Protocol
 
 import structlog
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from domain import handoff, lead_merge, repositories, scoring, texts
@@ -757,3 +758,76 @@ async def run_sync_lead(
             )
             await session.commit()
             return "retry", delay_seconds
+
+
+async def run_revive_leads(
+    session_factory: SessionFactory,
+    sender: MessageSender,
+    *,
+    after_days: int = 3,
+    max_attempts: int = 1,
+    brand_name: str = "",
+) -> int:
+    """沉睡线索唤醒（每日 cron）：对聊过但安静了 N 天的中高意向线索发一条跟进。
+
+    克制原则：只打扰 ai_active 会话（human_active/closed 绝不碰，§9 状态机约束）、
+    只看 open 的 medium/high 线索、每条线索至多 max_attempts 次（revive_count 持久防重）。
+    文案是确定性模板（texts.revive_follow_up），不走 LLM——绝不编造承诺。
+    逐条独立事务：单条失败只记日志，不影响其余。返回实际发送数。
+    """
+    from datetime import timedelta
+
+    cutoff = datetime.now(UTC) - timedelta(days=after_days)
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(Lead, Conversation)
+                .join(Conversation, Lead.conversation_id == Conversation.id)
+                .where(
+                    Lead.status == "open",
+                    Lead.grade.in_(["medium", "high"]),
+                    Lead.revive_count < max_attempts,
+                    Conversation.status == "ai_active",
+                    Conversation.last_message_at.is_not(None),
+                    Conversation.last_message_at < cutoff,
+                )
+            )
+        ).all()
+
+    sent = 0
+    text = texts.revive_follow_up(brand_name)
+    for lead, conversation in rows:
+        try:
+            tg_message_id = await sender.send_message(conversation.telegram_chat_id, text)
+        except Exception:
+            logger.warning("revive_send_failed", lead_id=lead.id)
+            continue
+        async with session_factory() as session:
+            session.add(
+                Message(
+                    conversation_id=conversation.id,
+                    telegram_message_id=tg_message_id,
+                    direction="outbound",
+                    sender_type="system",
+                    content=text,
+                    delivery_status="sent",
+                )
+            )
+            await repositories.update_lead(
+                session,
+                lead.id,
+                {"revive_count": lead.revive_count + 1, "last_revived_at": func.now()},
+            )
+            await repositories.touch_last_message(session, conversation.id)
+            await repositories.add_audit(
+                session,
+                "system",
+                "lead_revived",
+                "lead",
+                lead.id,
+                {"attempt": lead.revive_count + 1},
+            )
+            await session.commit()
+        sent += 1
+        logger.info("lead_revived", lead_id=lead.id, conversation_id=conversation.id)
+    return sent

@@ -10,9 +10,11 @@ import {
   Empty,
   Form,
   Input,
+  InputNumber,
   Modal,
   Space,
   Steps,
+  Switch,
   Tag,
   Typography,
 } from "antd";
@@ -32,6 +34,12 @@ interface TelegramConf {
 interface GeneralConf {
   brand_name: string;
   bot_tone_hint: string;
+}
+
+interface ReviveConf {
+  enabled: boolean;
+  after_days: number;
+  max_attempts: number;
 }
 
 interface Candidate {
@@ -54,15 +62,19 @@ export default function SystemSettingsPage() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [tokenInput, setTokenInput] = useState("");
   const [generalForm] = Form.useForm();
+  const [reviveForm] = Form.useForm();
+  const [savingRevive, setSavingRevive] = useState(false);
 
   const load = useCallback(async () => {
-    const [t, g] = await Promise.all([
+    const [t, g, r] = await Promise.all([
       api.get<TelegramConf>("/api/settings/telegram"),
       api.get<GeneralConf>("/api/settings/general"),
+      api.get<ReviveConf>("/api/settings/revive"),
     ]);
     setTg(t);
     generalForm.setFieldsValue(g);
-  }, [generalForm]);
+    reviveForm.setFieldsValue(r);
+  }, [generalForm, reviveForm]);
 
   useEffect(() => {
     load();
@@ -129,6 +141,18 @@ export default function SystemSettingsPage() {
       message.error(e instanceof ApiError ? e.message : "发送失败");
     } finally {
       setTesting(false);
+    }
+  };
+
+  const saveRevive = async (values: ReviveConf) => {
+    setSavingRevive(true);
+    try {
+      await api.put("/api/settings/revive", values);
+      message.success("已保存，明天起按新规则执行");
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "保存失败");
+    } finally {
+      setSavingRevive(false);
     }
   };
 
@@ -269,6 +293,32 @@ export default function SystemSettingsPage() {
             <Input.TextArea rows={2} maxLength={500} placeholder="留空使用默认专业语气" />
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={savingGeneral}>
+            保存
+          </Button>
+        </Form>
+      </Card>
+
+      <Card title="自动跟进（沉睡客户唤醒）" style={{ marginTop: 16 }}>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 16 }}>
+          客户聊过但几天没动静时，机器人每天上午自动发一条跟进消息（只跟进有购买意向的客户，
+          绝不打扰人工接管中的会话；客户一回复就恢复正常接待）。
+        </Typography.Paragraph>
+        <Form
+          form={reviveForm}
+          layout="inline"
+          onFinish={saveRevive}
+          style={{ rowGap: 12 }}
+        >
+          <Form.Item name="enabled" label="开启" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="after_days" label="安静几天后跟进">
+            <InputNumber min={1} max={60} addonAfter="天" style={{ width: 110 }} />
+          </Form.Item>
+          <Form.Item name="max_attempts" label="每位客户最多跟进">
+            <InputNumber min={0} max={5} addonAfter="次" style={{ width: 110 }} />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={savingRevive}>
             保存
           </Button>
         </Form>

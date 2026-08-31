@@ -29,6 +29,10 @@ KEY_TELEGRAM_BOT_USERNAME = "telegram_bot_username"  # 保存 token 时经 getMe
 KEY_OPERATOR_CHAT_ID = "operator_telegram_chat_id"
 KEY_BRAND_NAME = "brand_name"
 KEY_BOT_TONE_HINT = "bot_tone_hint"
+# 沉睡唤醒（后台「系统设置」可配；存字符串："true"/"false" 与数字文本）
+KEY_REVIVE_ENABLED = "revive_enabled"
+KEY_REVIVE_AFTER_DAYS = "revive_after_days"
+KEY_REVIVE_MAX_ATTEMPTS = "revive_max_attempts"
 
 ENCRYPTED_KEYS = frozenset({KEY_TELEGRAM_BOT_TOKEN})
 
@@ -110,6 +114,23 @@ class AppSettingsStore:
 
     async def bot_tone_hint(self) -> str:
         return await self.get(KEY_BOT_TONE_HINT, self._settings.bot_tone_hint)
+
+    async def revive_enabled(self) -> bool:
+        raw = await self.get(KEY_REVIVE_ENABLED)
+        return raw == "true" if raw else self._settings.revive_enabled
+
+    async def _int_of(self, key: str, fallback: int, lo: int, hi: int) -> int:
+        raw = await self.get(key)
+        try:
+            return min(hi, max(lo, int(raw))) if raw else fallback
+        except ValueError:
+            return fallback
+
+    async def revive_after_days(self) -> int:
+        return await self._int_of(KEY_REVIVE_AFTER_DAYS, self._settings.revive_after_days, 1, 60)
+
+    async def revive_max_attempts(self) -> int:
+        return await self._int_of(KEY_REVIVE_MAX_ATTEMPTS, self._settings.revive_max_attempts, 0, 5)
 
     # ---- 写入（api 侧） ----
 

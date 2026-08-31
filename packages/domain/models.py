@@ -252,6 +252,9 @@ class Lead(Base):
     # 实质变更 +1，同步幂等键的组成部分（§11）
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     external_crm_id: Mapped[str | None] = mapped_column(Text)
+    # 沉睡唤醒（防骚扰）：已唤醒次数与最近唤醒时间
+    revive_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    last_revived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

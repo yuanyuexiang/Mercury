@@ -14,6 +14,9 @@ from integrations.app_settings import (
     KEY_BOT_TONE_HINT,
     KEY_BRAND_NAME,
     KEY_OPERATOR_CHAT_ID,
+    KEY_REVIVE_AFTER_DAYS,
+    KEY_REVIVE_ENABLED,
+    KEY_REVIVE_MAX_ATTEMPTS,
     KEY_TELEGRAM_BOT_TOKEN,
     KEY_TELEGRAM_BOT_USERNAME,
     publish_invalidation,
@@ -210,6 +213,43 @@ async def telegram_candidates(request: Request) -> dict[str, Any]:
         if len(items) >= 5:
             break
     return {"items": items}
+
+
+@router.get("/revive", dependencies=AdminRead)
+async def get_revive(request: Request) -> dict[str, Any]:
+    store = request.app.state.app_settings_store
+    return {
+        "enabled": await store.revive_enabled(),
+        "after_days": await store.revive_after_days(),
+        "max_attempts": await store.revive_max_attempts(),
+    }
+
+
+class RevivePut(BaseModel):
+    enabled: bool | None = None
+    after_days: int | None = None  # 1–60
+    max_attempts: int | None = None  # 0–5
+
+
+@router.put("/revive", dependencies=AdminWrite)
+async def put_revive(request: Request, body: RevivePut) -> dict[str, Any]:
+    store = request.app.state.app_settings_store
+    values: dict[str, str] = {}
+    if body.enabled is not None:
+        values[KEY_REVIVE_ENABLED] = "true" if body.enabled else "false"
+    if body.after_days is not None:
+        if not 1 <= body.after_days <= 60:
+            raise HTTPException(status_code=422, detail="安静天数需在 1–60 之间")
+        values[KEY_REVIVE_AFTER_DAYS] = str(body.after_days)
+    if body.max_attempts is not None:
+        if not 0 <= body.max_attempts <= 5:
+            raise HTTPException(status_code=422, detail="跟进次数需在 0–5 之间")
+        values[KEY_REVIVE_MAX_ATTEMPTS] = str(body.max_attempts)
+    if not values:
+        raise HTTPException(status_code=422, detail="没有要保存的字段")
+    await store.set_values(values)
+    await publish_invalidation(request.app.state.redis)
+    return await get_revive(request)
 
 
 @router.get("/general", dependencies=AdminRead)

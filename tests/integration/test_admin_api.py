@@ -663,3 +663,27 @@ async def test_fetch_provider_models(client, session_factory, monkeypatch) -> No
         headers=WRITE_HEADERS,
     )
     assert resp.status_code == 200 and len(resp.json()["items"]) == 2
+
+
+async def test_revive_settings_backed_by_admin(client) -> None:
+    """唤醒配置走后台（配置进后台不进 env 的铁律）：GET 默认 → PUT → 生效值与越界校验。"""
+    await _login(client)
+    conf = (await client.get("/api/settings/revive")).json()
+    assert conf == {"enabled": True, "after_days": 3, "max_attempts": 1}
+
+    resp = await client.put(
+        "/api/settings/revive",
+        json={"enabled": False, "after_days": 7, "max_attempts": 2},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"enabled": False, "after_days": 7, "max_attempts": 2}
+
+    # worker 读取路径（store helpers）与后台一致
+    store = client.app.state.app_settings_store
+    assert await store.revive_enabled() is False
+    assert await store.revive_after_days() == 7
+    assert await store.revive_max_attempts() == 2
+
+    resp = await client.put("/api/settings/revive", json={"after_days": 99}, headers=WRITE_HEADERS)
+    assert resp.status_code == 422

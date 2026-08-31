@@ -10,6 +10,17 @@ def welcome(brand_name: str = "") -> str:
     )
 
 
+def revive_follow_up(brand_name: str = "") -> str:
+    """沉睡唤醒（确定性模板，不走 LLM——绝不编造承诺）。"""
+    who = f"{brand_name}的" if brand_name else "我们的"
+    return (
+        f"您好，之前的咨询如果还有想了解的，随时告诉我；"
+        f"也可以直接说「约演示」或「要报价」，{who}同事会尽快联系您。\n"
+        "Hi again — happy to pick up where we left off. "
+        'Ask me anything, or just say "demo" or "quote" and our team will reach out.'
+    )
+
+
 RESET_DONE = "会话已重新开始。请问有什么可以帮您？"
 
 HUMAN_ACK = "已通知人工客服，稍后会有同事跟进。"
