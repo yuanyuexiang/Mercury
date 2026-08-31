@@ -13,7 +13,7 @@ from typing import Any, Protocol, TypeVar
 
 import structlog
 from domain.config import Settings
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from pydantic import BaseModel
 
 from llm.prompts import JSON_FALLBACK_SUFFIX
@@ -178,18 +178,38 @@ class Embedder(Protocol):
 
 
 class OpenAIEmbedder:
-    """OpenAI 兼容 embedding 端点；批量调用并记录耗时（§12 记账要求）。"""
+    """OpenAI 兼容 embedding 端点；批量调用并记录耗时（§12 记账要求）。
 
-    def __init__(self, base_url: str, api_key: str, model: str) -> None:
+    dimensions：向 Matryoshka 模型（如 Qwen3-Embedding 系列，原生维度非 1536）请求
+    定制输出维度；上游拒绝该参数时自动降级为不带参重试并记住结论
+    （原生 1536 维模型两种调法结果一致）。维度守卫在调用方兜底。
+    """
+
+    def __init__(
+        self, base_url: str, api_key: str, model: str, dimensions: int | None = None
+    ) -> None:
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self._model = model
+        self._dimensions = dimensions
+        self._dimensions_rejected = False
+
+    async def _create(self, batch: list[str]) -> Any:
+        if self._dimensions is not None and not self._dimensions_rejected:
+            try:
+                return await self._client.embeddings.create(
+                    model=self._model, input=batch, dimensions=self._dimensions
+                )
+            except BadRequestError:
+                logger.info("embed_dimensions_rejected_retry_without", model=self._model)
+                self._dimensions_rejected = True
+        return await self._client.embeddings.create(model=self._model, input=batch)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []
         for start in range(0, len(texts), EMBED_BATCH_SIZE):
             batch = texts[start : start + EMBED_BATCH_SIZE]
             began = time.monotonic()
-            resp = await self._client.embeddings.create(model=self._model, input=batch)
+            resp = await self._create(batch)
             logger.info(
                 "embeddings_created",
                 model=self._model,
@@ -227,7 +247,14 @@ class DeterministicFakeEmbedder:
 def build_embedder(settings: Settings) -> OpenAIEmbedder | None:
     """无 LLM_API_KEY 时返回 None：索引任务会明确失败，绝不静默用假向量污染知识库。"""
     if settings.llm_api_key:
-        return OpenAIEmbedder(settings.llm_base_url, settings.llm_api_key, settings.llm_embed_model)
+        from domain.models import EMBEDDING_DIM
+
+        return OpenAIEmbedder(
+            settings.llm_base_url,
+            settings.llm_api_key,
+            settings.llm_embed_model,
+            dimensions=EMBEDDING_DIM,
+        )
     return None
 
 

@@ -155,11 +155,16 @@ async def setup_status(request: Request) -> dict[str, Any]:
                 .where(KnowledgeDocument.status == "active")
             )
         ).scalar() or 0
-    # 知识库检索（embedding）可用性：激活供应商配了 embed_model，或 env 有兜底 key——
-    # 缺失时上传的文档无法索引，必须在界面上显式警告（小白陷阱）
-    embedding_ready = bool(
-        (active_provider is not None and active_provider.embed_model) or settings.llm_api_key
-    )
+        embed_providers = (
+            await session.execute(
+                select(func.count())
+                .select_from(LlmProvider)
+                .where(LlmProvider.embed_model.is_not(None))
+            )
+        ).scalar() or 0
+    # 知识库检索（embedding）可用性：任一供应商配了检索模型（无需激活，对话与检索
+    # 可不同家），或 env 有兜底 key——缺失时上传的文档无法索引，界面必须显式警告
+    embedding_ready = bool(embed_providers or settings.llm_api_key)
     return {
         "telegram": bool(await store.telegram_bot_token()),
         "operator": bool(await store.operator_chat_id()),

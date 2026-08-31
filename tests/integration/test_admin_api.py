@@ -38,6 +38,14 @@ class FakeTestChat:
         return type("R", (), {"content": "pong"})()
 
 
+class FakeTestEmbedder:
+    def __init__(self, dim: int = 1536) -> None:
+        self.dim = dim
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1] * self.dim for _ in texts]
+
+
 @pytest.fixture
 def settings(redis_client) -> Settings:
     return Settings(
@@ -60,6 +68,7 @@ async def client(session_factory, redis_client, settings, sender):
     app.state.arq = StubArq()
     app.state.sender = sender
     app.state.chat_client_factory = lambda base_url, api_key, model: FakeTestChat(ok=True)
+    app.state.embedder_factory = lambda base_url, api_key, model: FakeTestEmbedder(dim=1536)
     app.state.app_settings_store = AppSettingsStore(session_factory, redis_client, settings)
 
     async def _fake_probe(token: str) -> str:
@@ -271,6 +280,77 @@ async def test_provider_crud_activate_and_hot_reload(
         f"/api/settings/llm-providers/{provider['id']}", headers=WRITE_HEADERS
     )
     assert resp.status_code == 409
+
+
+async def test_embedding_only_provider_cross_vendor(
+    client, session_factory, redis_client, settings, monkeypatch
+) -> None:
+    """§12 修订：对话与检索可不同家——检索模型配在未激活供应商上也能被解析。"""
+    monkeypatch.setattr(
+        "integrations.netguard.socket.getaddrinfo",
+        lambda host, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
+    await _login(client)
+    # 对话供应商（无检索模型）+ 仅检索供应商（无对话模型）
+    chat_provider = (
+        await client.post(
+            "/api/settings/llm-providers",
+            json={
+                "name": "智谱",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                "api_key": "sk-chat-key",
+                "chat_model": "glm-4.7",
+            },
+            headers=WRITE_HEADERS,
+        )
+    ).json()
+    embed_provider = (
+        await client.post(
+            "/api/settings/llm-providers",
+            json={
+                "name": "硅基流动",
+                "base_url": "https://api.siliconflow.cn/v1",
+                "api_key": "sk-embed-key",
+                "chat_model": "",
+                "embed_model": "Qwen/Qwen3-Embedding-8B",
+            },
+            headers=WRITE_HEADERS,
+        )
+    ).json()
+
+    # 仅检索的供应商不可激活为对话供应商
+    resp = await client.post(
+        f"/api/settings/llm-providers/{embed_provider['id']}/activate", headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 409
+
+    # 激活对话供应商后：chat 走激活行，embedding 解析到未激活的检索行
+    resp = await client.post(
+        f"/api/settings/llm-providers/{chat_provider['id']}/activate", headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 200
+    source = ProviderSource(session_factory, redis_client, settings)
+    config = await source.get()
+    assert config is not None and config.chat_model == "glm-4.7"
+    embed = await source.get_embed()
+    assert embed is not None and embed.source == "db"
+    assert embed.embed_model == "Qwen/Qwen3-Embedding-8B"
+    assert embed.api_key == "sk-embed-key"
+    assert embed.base_url == "https://api.siliconflow.cn/v1"
+
+    # 「测试」对仅检索供应商测 embedding：1536 维通过，非 1536 维给明确报错
+    resp = await client.post(
+        f"/api/settings/llm-providers/{embed_provider['id']}/test", headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    client.app.state.embedder_factory = (  # type: ignore[attr-defined]
+        lambda base_url, api_key, model: FakeTestEmbedder(dim=4096)
+    )
+    resp = await client.post(
+        f"/api/settings/llm-providers/{embed_provider['id']}/test", headers=WRITE_HEADERS
+    )
+    body = resp.json()
+    assert body["ok"] is False and "4096" in (body["error"] or "")
 
 
 async def test_provider_source_env_fallback_and_invalidate(

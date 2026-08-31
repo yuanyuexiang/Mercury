@@ -7,10 +7,11 @@ import redis.asyncio as aioredis
 from arq import create_pool
 from arq.connections import RedisSettings
 from domain.config import get_settings, validate_production_settings
+from domain.models import EMBEDDING_DIM
 from fastapi import FastAPI
 from integrations.app_settings import AppSettingsStore
 from integrations.telegram import DynamicSender, probe_token, register_webhook
-from llm.client import OpenAIChatClient, list_models
+from llm.client import OpenAIChatClient, OpenAIEmbedder, list_models
 from observability.logging import configure_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -58,6 +59,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 供应商连接测试用；测试中可替换为 Fake（§10 /test）
     app.state.chat_client_factory = lambda base_url, api_key, model: OpenAIChatClient(
         base_url=base_url, api_key=api_key, model=model
+    )
+    app.state.embedder_factory = lambda base_url, api_key, model: OpenAIEmbedder(
+        base_url, api_key, model, dimensions=EMBEDDING_DIM
     )
     yield
     await app.state.app_settings_store.stop_listener()

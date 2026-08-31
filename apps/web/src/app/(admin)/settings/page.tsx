@@ -162,6 +162,10 @@ export default function SettingsPage() {
   };
 
   const submit = async (values: Record<string, unknown>) => {
+    // AutoComplete 清空后可能是 undefined：归一为 ""，让「清掉对话/检索模型」能真正存下去
+    for (const k of ["chat_model", "fallback_model", "embed_model"]) {
+      if (values[k] === undefined || values[k] === null) values[k] = "";
+    }
     try {
       if (editing) {
         if (!values.api_key) delete values.api_key; // 留空保留原密文
@@ -246,7 +250,13 @@ export default function SettingsPage() {
                 </Space>
               ),
             },
-            { title: "对话模型", dataIndex: "chat_model", width: 160 },
+            {
+              title: "对话模型",
+              dataIndex: "chat_model",
+              width: 160,
+              render: (v: string) =>
+                v || <span style={{ color: "#cbd5e1" }}>未配置</span>,
+            },
             {
               title: "知识库检索模型",
               dataIndex: "embed_model",
@@ -278,7 +288,7 @@ export default function SettingsPage() {
               width: 250,
               render: (_, p) => (
                 <Space>
-                  {!p.is_active && (
+                  {!p.is_active && !!p.chat_model && (
                     <Button
                       size="small"
                       type="primary"
@@ -316,8 +326,9 @@ export default function SettingsPage() {
           ]}
         />
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 4 }}>
-          同一时间只有一家「使用中」——点「激活」即切换，立即生效。建议先「测试」确认连接正常再激活；
-          更换知识库检索模型后，需到「知识库」对所有文档重建索引。
+          「使用中」的那家负责对话，同一时间只有一家——点「激活」即切换，立即生效；
+          知识库检索模型配在任意一家上即可（无需激活），对话和检索可以来自不同服务商。
+          建议先「测试」确认连接正常再激活；更换知识库检索模型后，需到「知识库」对所有文档重建索引。
         </Typography.Paragraph>
       </Card>
 
@@ -388,11 +399,23 @@ export default function SettingsPage() {
                 </Button>
               </Space>
             }
-            rules={[{ required: true, message: "请输入模型名" }]}
+            extra="仅做知识库检索的供应商可留空（留空则不可激活为对话供应商）"
           >
             <AutoComplete
               options={models.map((m) => ({ value: m }))}
               placeholder="选模板已自动填；贴上 Key 后可拉取列表选择"
+              filterOption={(input, option) =>
+                (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+              }
+            />
+          </Form.Item>
+          <Form.Item
+            name="embed_model"
+            label="知识库检索模型（机器人靠它搜索知识库；配在任意一家即可，无需激活）"
+          >
+            <AutoComplete
+              options={models.map((m) => ({ value: m }))}
+              placeholder="OpenAI 填 text-embedding-3-small；留空 = 用别家或系统默认"
               filterOption={(input, option) =>
                 (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
               }
@@ -432,18 +455,6 @@ export default function SettingsPage() {
                       <AutoComplete
                         options={models.map((m) => ({ value: m }))}
                         placeholder="留空 = 不用备用"
-                        filterOption={(input, option) =>
-                          (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-                        }
-                      />
-                    </Form.Item>
-                    <Form.Item
-                      name="embed_model"
-                      label="知识库检索模型（机器人靠它搜索知识库；OpenAI 填 text-embedding-3-small）"
-                    >
-                      <AutoComplete
-                        options={models.map((m) => ({ value: m }))}
-                        placeholder="留空则知识库检索走系统默认配置"
                         filterOption={(input, option) =>
                           (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
                         }

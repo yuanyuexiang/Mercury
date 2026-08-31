@@ -41,6 +41,16 @@ class ProviderConfig:
     source: str = "env"  # env|db，日志与后台展示用
 
 
+@dataclass(frozen=True)
+class EmbedConfig:
+    """embedding 独立解析结果：对话与知识库检索可以来自不同供应商（§12 修订）。"""
+
+    base_url: str
+    api_key: str
+    embed_model: str
+    source: str = "env"  # env|db
+
+
 def _fernet(settings: Settings) -> Fernet:
     if not settings.settings_encryption_key:
         raise RuntimeError("缺少 SETTINGS_ENCRYPTION_KEY（Fernet 主密钥）")
@@ -87,6 +97,8 @@ class ProviderSource:
         self._settings = settings
         self._cache: ProviderConfig | None = None
         self._cached_at = 0.0
+        self._embed_cache: EmbedConfig | None = None
+        self._embed_cached_at = 0.0
         self._listener_task: asyncio.Task[None] | None = None
 
     async def get(self) -> ProviderConfig | None:
@@ -97,9 +109,27 @@ class ProviderSource:
         self._cached_at = time.monotonic()
         return config
 
+    async def get_embed(self) -> EmbedConfig | None:
+        """embedding 配置独立解析：激活供应商优先，其次任一配了检索模型的供应商，最后 env。
+
+        对话与检索因此可以不同家（如智谱管对话 + 硅基流动管检索）——检索模型
+        配在任意一行供应商上即可，无需激活（激活只决定谁来对话）。
+        """
+        if (
+            self._embed_cache is not None
+            and (time.monotonic() - self._embed_cached_at) < CACHE_TTL_S
+        ):
+            return self._embed_cache
+        config = await self._load_embed()
+        self._embed_cache = config
+        self._embed_cached_at = time.monotonic()
+        return config
+
     def invalidate(self) -> None:
         self._cache = None
         self._cached_at = 0.0
+        self._embed_cache = None
+        self._embed_cached_at = 0.0
 
     async def _load(self) -> ProviderConfig | None:
         try:
@@ -120,6 +150,35 @@ class ProviderSource:
         except Exception:
             logger.exception("provider_db_load_failed_falling_back_to_env")
         return env_provider(self._settings)
+
+    async def _load_embed(self) -> EmbedConfig | None:
+        try:
+            async with self._session_factory() as session:
+                row = (
+                    await session.execute(
+                        select(LlmProvider)
+                        .where(LlmProvider.embed_model.is_not(None))
+                        .order_by(LlmProvider.is_active.desc(), LlmProvider.updated_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            if row is not None and row.embed_model:
+                return EmbedConfig(
+                    base_url=row.base_url,
+                    api_key=decrypt_api_key(self._settings, row.api_key_enc),
+                    embed_model=row.embed_model,
+                    source="db",
+                )
+        except Exception:
+            logger.exception("embed_db_load_failed_falling_back_to_env")
+        if self._settings.llm_api_key:
+            return EmbedConfig(
+                base_url=self._settings.llm_base_url,
+                api_key=self._settings.llm_api_key,
+                embed_model=self._settings.llm_embed_model,
+                source="env",
+            )
+        return None
 
     def start_listener(self) -> None:
         """worker 侧：订阅失效广播，收到即清缓存（热切换的即时性来源）。"""
@@ -171,6 +230,9 @@ class DynamicChatClient:
         config = await self._source.get()
         if config is None:
             raise ProviderNotConfigured("无可用 LLM 供应商（DB 未激活且 env 未配置）")
+        if not config.chat_model:
+            # 仅做知识库检索的供应商（chat_model 为空）被误激活时明确降级
+            raise ProviderNotConfigured("激活的供应商未配置对话模型")
         if config != self._active_config:
             self._client = OpenAIChatClient(
                 base_url=config.base_url,
@@ -190,7 +252,8 @@ class DynamicChatClient:
 class DynamicEmbedder:
     """每次调用解析供应商配置的 embedder（§12 修订：后台可配 embedding）。
 
-    解析顺序：激活供应商配了 embed_model → 用它；否则 env 兜底（LLM_API_KEY + LLM_EMBED_MODEL）。
+    解析顺序见 ProviderSource.get_embed（激活供应商 → 任一配了检索模型的供应商 → env）。
+    请求携带 dimensions=EMBEDDING_DIM（Matryoshka 模型按需输出，不支持的上游自动降级）。
     维度守卫：返回向量必须是 EMBEDDING_DIM（1536）维，否则报明确错误——
     换维度意味着全量重建向量库，不允许静默发生。
     """
@@ -204,23 +267,16 @@ class DynamicEmbedder:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         from llm.client import OpenAIEmbedder
 
-        config = await self._source.get()
-        if config is not None and config.embed_model:
-            key = (config.base_url, config.api_key, config.embed_model)
-        elif self._settings.llm_api_key:
-            key = (
-                self._settings.llm_base_url,
-                self._settings.llm_api_key,
-                self._settings.llm_embed_model,
-            )
-        else:
+        config = await self._source.get_embed()
+        if config is None:
             raise LlmNotConfiguredError(
-                "无可用 embedding 配置（供应商未配 embed_model 且 env 无 LLM_API_KEY）"
+                "无可用 embedding 配置（没有供应商配置「知识库检索模型」，env 也无 LLM_API_KEY）"
             )
+        key = (config.base_url, config.api_key, config.embed_model)
         if key != self._active_key:
-            self._embedder = OpenAIEmbedder(*key)
+            self._embedder = OpenAIEmbedder(*key, dimensions=EMBEDDING_DIM)
             self._active_key = key
-            logger.info("embedder_rebuilt", model=key[2])
+            logger.info("embedder_rebuilt", model=key[2], source=config.source)
         assert self._embedder is not None
         vectors = await self._embedder.embed(texts)  # type: ignore[attr-defined]
         if vectors and len(vectors[0]) != EMBEDDING_DIM:

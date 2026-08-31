@@ -5,7 +5,7 @@ from typing import Any
 
 import structlog
 from domain import repositories
-from domain.models import LlmProvider
+from domain.models import EMBEDDING_DIM, LlmProvider
 from fastapi import APIRouter, HTTPException, Request
 from llm.provider_config import decrypt_api_key, encrypt_api_key, publish_invalidation
 from pydantic import BaseModel
@@ -45,9 +45,9 @@ class ProviderCreate(BaseModel):
     name: str
     base_url: str
     api_key: str
-    chat_model: str
+    chat_model: str = ""  # 空 = 该供应商只做知识库检索（不可激活为对话供应商）
     fallback_model: str = ""
-    embed_model: str = ""  # 空 = embedding 用 env 兜底；必须为 1536 维模型
+    embed_model: str = ""  # 空 = embedding 用别家或 env 兜底；必须能输出 1536 维
     supports_json_schema: bool = True
 
 
@@ -164,6 +164,11 @@ async def activate_provider(request: Request, provider_id: int) -> dict[str, Any
         provider = await session.get(LlmProvider, provider_id)
         if provider is None:
             raise HTTPException(status_code=404)
+        if not provider.chat_model:
+            raise HTTPException(
+                status_code=409,
+                detail="该供应商未配置对话模型，不能激活——只做知识库检索的供应商无需激活",
+            )
         await session.execute(update(LlmProvider).values(is_active=False))
         provider.is_active = True
         await repositories.add_audit(
@@ -181,27 +186,49 @@ async def activate_provider(request: Request, provider_id: int) -> dict[str, Any
 
 @router.post("/{provider_id}/test", dependencies=AdminWrite)
 async def test_provider(request: Request, provider_id: int) -> dict[str, Any]:
-    """最小对话调用（§10）：回填 last_test_*，避免填错 key 等到真实用户消息才发现。"""
+    """最小真实调用（§10）：配了对话模型测对话，配了检索模型测 embedding（含 1536 维校验），
+    回填 last_test_*，避免填错 key/选错维度等到真实用户消息才发现。"""
     settings = request.app.state.settings
     async with request.app.state.session_factory() as session:
         provider = await session.get(LlmProvider, provider_id)
         if provider is None:
             raise HTTPException(status_code=404)
-        base_url, model = provider.base_url, provider.chat_model
+        base_url = provider.base_url
+        chat_model, embed_model = provider.chat_model, provider.embed_model
         api_key = decrypt_api_key(settings, provider.api_key_enc)
 
     began = time.monotonic()
-    ok, error = True, None
-    try:
-        chat_factory = request.app.state.chat_client_factory
-        client = chat_factory(base_url, api_key, model)
-        await client.chat(
-            [{"role": "user", "content": "ping — reply with 'pong' only"}],
-            purpose="test",
-            timeout_s=15.0,
-        )
-    except Exception as exc:
-        ok, error = False, repr(exc)[:300]
+    ok = True
+    errors: list[str] = []
+    if chat_model:
+        try:
+            client = request.app.state.chat_client_factory(base_url, api_key, chat_model)
+            await client.chat(
+                [{"role": "user", "content": "ping — reply with 'pong' only"}],
+                purpose="test",
+                timeout_s=15.0,
+            )
+        except Exception as exc:
+            ok = False
+            errors.append(f"对话模型：{repr(exc)[:200]}")
+    if embed_model:
+        try:
+            embedder = request.app.state.embedder_factory(base_url, api_key, embed_model)
+            vectors = await embedder.embed(["ping"])
+            dim = len(vectors[0]) if vectors else 0
+            if dim != EMBEDDING_DIM:
+                ok = False
+                errors.append(
+                    f"检索模型维度 {dim} ≠ {EMBEDDING_DIM}：该模型不适用，"
+                    f"请换支持 {EMBEDDING_DIM} 维输出的模型"
+                )
+        except Exception as exc:
+            ok = False
+            errors.append(f"检索模型：{repr(exc)[:200]}")
+    if not chat_model and not embed_model:
+        ok = False
+        errors.append("对话模型与检索模型均未配置，无可测试项")
+    error = "；".join(errors) or None
     latency_ms = int((time.monotonic() - began) * 1000)
 
     async with request.app.state.session_factory() as session:
