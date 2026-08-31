@@ -316,8 +316,8 @@ export default function SettingsPage() {
           ]}
         />
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 4 }}>
-          Embedding 模型须为 1536 维（如 text-embedding-3-small）；更换 Embedding
-          模型后需在「知识库」对所有文档重建索引。
+          同一时间只有一家「使用中」——点「激活」即切换，立即生效。建议先「测试」确认连接正常再激活；
+          更换知识库检索模型后，需到「知识库」对所有文档重建索引。
         </Typography.Paragraph>
       </Card>
 
