@@ -718,21 +718,22 @@ PUBLIC_HOST=                    # 对外域名（PUBLIC_BASE_URL 的 host 部分
 ### ci.yml — 质量门禁（PR 触发 + 被 cd.yml workflow_call 复用）
 
 刻意保持 ci.yml 与 cd.yml 两个文件（触发场景、权限、失败语义不同，合并只会堆 if 条件；
-deploy 持 SSH 凭据，PR 触发的 workflow 不应含凭据上下文）。push main/master 时 Deploy 的
-首个 job `uses: ./.github/workflows/ci.yml`——**测试不过不构建不部署**，同一提交 CI 只跑一遍；
-手动回滚（dispatch 填历史 tag）跳过 CI 与构建，保证回滚速度。
+deploy 持 SSH 凭据，PR 触发的 workflow 不应含凭据上下文）。push main/master 时 Deploy
+经 `uses: ./.github/workflows/ci.yml` 复用本文件，**ci 与 build 并行、deploy 同时依赖两者**
+（2026-09-01 提速修订：测试不过照样部署不了，代价只是测试挂掉时白构建一次镜像，
+换约 1.5 分钟墙钟）；手动回滚（dispatch 填历史 tag）跳过 CI 与构建，保证回滚速度。
 
 两个并行 job：
 
 - `python`：`uv sync` → `ruff check` + `ruff format --check` → `mypy` → `pytest`（单元 + 集成）。
   集成测试依赖用 GitHub Actions **services 容器**：`pgvector/pgvector:pg16` + `redis:7`；LLM 全部走 FakeLLM，**CI 不需要也不配置任何真实模型 key**。
-- `web`：`pnpm install` → lint → `tsc --noEmit` → `next build`。
+- `web`：`pnpm install` → lint → `tsc --noEmit` → `next build`（仅 PR 构建验证；push 走 Deploy 时由 build job 实际构建并打镜像，避免同一提交 build 两遍）。
 
 main 开分支保护：CI 全绿才能合并。单人开发也走「短命分支 + PR」，让 CI 卡住坏提交，同时 PR 历史就是变更日志。
 
 ### cd.yml — 发布（push 到 main 自动触发 + workflow_dispatch 手动）
 
-1. buildx 构建两个镜像——`mercury-app`（api/worker 共用，见 §16）与 `mercury-web`——tag 为 `sha-<short>` 和 `latest`，push GHCR（启用 gha 层缓存）。
+1. 构建两个镜像——`mercury-app`（api/worker 共用，见 §16）buildx 构建（gha 层缓存，uv 依赖层命中即 ~1 分钟内）；`mercury-web` 走**预构建直拷贝**（2026-09-01 提速修订）：build job 先在 runner 上 `pnpm build`（`actions/cache` 持久化 `.next/cache` 增量缓存 + pnpm 缓存），把 standalone 产物 `cp -a` 组装成独立上下文（必须保留 pnpm 符号链接，解引用会破坏 `.pnpm` 解析布局），再用 `deploy/Dockerfile.web-prebuilt` 仅拷贝打镜像——web 镜像构建从 ~3 分钟降到秒级；`deploy/Dockerfile.web` 保留作本地全量构建。tag 为 `sha-<short>` 和 `latest`，push GHCR。
 2. SSH 到演示服务器（secrets：`DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_SSH_KEY`），执行 `docker compose pull && docker compose up -d`。服务器上的 compose 引用 GHCR 镜像；migration 由 §16 的一次性 alembic 服务在启动时执行。
 3. 部署后验证：`curl --fail --retry 12 --retry-delay 5 --retry-all-errors "$PUBLIC_BASE_URL/health/ready"`（`PUBLIC_BASE_URL` 本身已含 `https://`，不要重复拼协议）。服务器部署脚本在 pull 前记录当前运行的镜像 tag，健康检查失败即用该 tag 自动回滚，workflow 标红。
 4. **回滚**：`workflow_dispatch` 接受输入 `image_tag`（默认 `latest`）——手动触发并填上一个可用的 `sha-*` tag 即回滚，不需要额外机制。

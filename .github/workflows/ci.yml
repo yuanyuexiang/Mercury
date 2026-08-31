@@ -71,4 +71,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
-      - run: pnpm build
+      # push 走 Deploy 时由 build job 实际执行 pnpm build（带增量缓存）并以此打镜像，
+      # 这里再跑一遍纯属重复；PR 没有 build job，保留构建验证。
+      - if: github.event_name == 'pull_request'
+        run: pnpm build
