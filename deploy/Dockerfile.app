@@ -13,6 +13,7 @@ COPY apps/api apps/api
 COPY apps/worker apps/worker
 COPY packages packages
 COPY migrations migrations
+COPY scripts scripts
 COPY alembic.ini ./
 RUN uv sync --frozen --no-dev
 
