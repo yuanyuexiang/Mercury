@@ -1,5 +1,6 @@
-// 常见 OpenAI 兼容供应商预设：选择即自动填 base_url/推荐模型，客户只贴 key。
-// embedding 须 1536 维（text-embedding-3-small），非 OpenAI 供应商 embed 留空走 env 兜底。
+// 常见 OpenAI 兼容服务商预设：选择即自动填 base_url/推荐模型，客户只贴 key。
+// 检索模型须能输出 1536 维——系统请求会带 dimensions=1536，
+// 原生 1536（text-embedding-3-small）或 Matryoshka 模型（Qwen3-Embedding 系列）均可。
 
 export interface ProviderPreset {
   label: string;
@@ -28,7 +29,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     embed_model: "text-embedding-3-small",
     supports_json_schema: true,
     keyUrl: "https://platform.openai.com/api-keys",
-    note: "对话 + embedding 一站配齐（唯一自带 1536 维 embedding 的预设）",
+    note: "对话 + 检索一站配齐，text-embedding-3-small 原生 1536 维",
   },
   {
     label: "OpenRouter（一个 key 用几百个模型）",
@@ -43,10 +44,10 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     label: "SiliconFlow 硅基流动",
     base_url: "https://api.siliconflow.cn/v1",
     chat_model: "deepseek-ai/DeepSeek-V3",
-    embed_model: "",
+    embed_model: "Qwen/Qwen3-Embedding-8B",
     supports_json_schema: false,
     keyUrl: "https://cloud.siliconflow.cn/account/ak",
-    note: "国内聚合站，开源模型全，国内网络友好",
+    note: "国内聚合站，开源模型全，国内网络友好；Qwen3-Embedding 可做知识库检索",
   },
   {
     label: "Moonshot Kimi",
@@ -70,7 +71,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     label: "阿里云通义（DashScope）",
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     chat_model: "qwen-plus",
-    embed_model: "",
+    embed_model: "text-embedding-v4",
     supports_json_schema: false,
     keyUrl: "https://bailian.console.aliyun.com/?apiKey=1",
     note: "阿里云生态，qwen 系列",

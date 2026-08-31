@@ -1,7 +1,7 @@
 "use client";
-// 模型供应商：增删改、激活（热切换）、连接测试；key 加密存储、脱敏展示。
+// 模型配置（§12 双槽位）：①服务商密钥 ②对话槽 ③检索槽。
+// 服务商只管 key；「谁来对话」「谁来检索」各自独立选择，可以不同家。
 import {
-  ApiOutlined,
   CheckCircleFilled,
   CloseCircleFilled,
   PlusOutlined,
@@ -10,15 +10,16 @@ import {
 import {
   App,
   AutoComplete,
-  Badge,
   Button,
   Card,
   Checkbox,
+  Col,
   Collapse,
   Form,
   Input,
   Modal,
   Popconfirm,
+  Row,
   Select,
   Space,
   Table,
@@ -42,6 +43,7 @@ interface Provider {
   embed_model: string | null;
   supports_json_schema: boolean;
   is_active: boolean;
+  is_embed_active: boolean;
   last_test_at: string | null;
   last_test_ok: boolean | null;
 }
@@ -108,6 +110,219 @@ function UsageCard() {
   );
 }
 
+const presetFor = (p?: Provider): ProviderPreset | undefined =>
+  p ? PROVIDER_PRESETS.find((x) => x.base_url === p.base_url) : undefined;
+
+// 用途槽位卡片：选服务商 → 选模型 → 保存并生效（保存后自动做连接测试）
+function RoleCard({
+  role,
+  providers,
+  onSaved,
+}: {
+  role: "chat" | "embed";
+  providers: Provider[];
+  onSaved: () => Promise<void>;
+}) {
+  const { message } = App.useApp();
+  const current = providers.find((p) => (role === "chat" ? p.is_active : p.is_embed_active));
+  const currentModel = (role === "chat" ? current?.chat_model : current?.embed_model) ?? "";
+
+  const [providerId, setProviderId] = useState<number | undefined>(current?.id);
+  const [model, setModel] = useState<string>(currentModel);
+  const [fallback, setFallback] = useState<string>(current?.fallback_model ?? "");
+  const [models, setModels] = useState<string[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const selected = providers.find((p) => p.id === providerId);
+  const dirty =
+    providerId !== current?.id ||
+    model !== currentModel ||
+    (role === "chat" && fallback !== (current?.fallback_model ?? ""));
+
+  const pickProvider = (id: number) => {
+    setProviderId(id);
+    setModels([]);
+    const preset = presetFor(providers.find((p) => p.id === id));
+    const recommended = role === "chat" ? preset?.chat_model : preset?.embed_model;
+    setModel(recommended || "");
+  };
+
+  const fetchModels = async () => {
+    if (!providerId) return;
+    setFetching(true);
+    try {
+      const data = await api.post<{ items: string[] }>("/api/settings/llm-providers/models", {
+        provider_id: providerId,
+      });
+      setModels(data.items);
+      message.success(`拉取到 ${data.items.length} 个模型，输入框已变为可搜索下拉`);
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "拉取失败");
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  const save = async () => {
+    if (!providerId || !model.trim()) {
+      message.info("请先选择服务商和模型");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.put(`/api/settings/llm-providers/roles/${role}`, {
+        provider_id: providerId,
+        model: model.trim(),
+        ...(role === "chat" ? { fallback_model: fallback } : {}),
+      });
+      const test = await api.post<{ ok: boolean; error: string | null }>(
+        `/api/settings/llm-providers/${providerId}/test`,
+        {},
+      );
+      if (test.ok) {
+        message.success("已保存并生效，连接正常");
+      } else {
+        message.warning(`已保存，但连接测试失败：${test.error ?? "未知错误"}`, 8);
+      }
+      await onSaved();
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const meta =
+    role === "chat"
+      ? { step: "第二步", title: "对话模型", subtitle: "谁来回答客户的消息" }
+      : { step: "第三步", title: "知识库检索模型", subtitle: "谁来搜索知识库（embedding）" };
+
+  return (
+    <Card
+      title={
+        <Space size={8}>
+          <Tag color="blue" style={{ marginRight: 0 }}>
+            {meta.step}
+          </Tag>
+          {meta.title}
+          <Typography.Text type="secondary" style={{ fontSize: 12.5, fontWeight: 400 }}>
+            {meta.subtitle}
+          </Typography.Text>
+        </Space>
+      }
+      styles={{ body: { paddingTop: 16 } }}
+    >
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <div>
+          <div style={{ fontSize: 13, marginBottom: 6 }}>服务商</div>
+          <Select
+            style={{ width: "100%" }}
+            placeholder={providers.length ? "选择一家服务商" : "请先在上方添加服务商"}
+            disabled={!providers.length}
+            value={providerId}
+            onChange={pickProvider}
+            options={providers.map((p) => ({ value: p.id, label: p.name }))}
+          />
+        </div>
+        <div>
+          <div style={{ fontSize: 13, marginBottom: 6 }}>
+            模型{" "}
+            <Button
+              size="small"
+              type="link"
+              loading={fetching}
+              disabled={!providerId}
+              onClick={fetchModels}
+              style={{ padding: 0 }}
+            >
+              拉取模型列表
+            </Button>
+          </div>
+          <AutoComplete
+            style={{ width: "100%" }}
+            value={model}
+            onChange={setModel}
+            options={models.map((m) => ({ value: m }))}
+            placeholder={
+              role === "chat" ? "如 glm-4.7 / deepseek-chat" : "如 Qwen/Qwen3-Embedding-8B"
+            }
+            filterOption={(input, option) =>
+              (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+            }
+          />
+        </div>
+        {role === "chat" && (
+          <Collapse
+            ghost
+            items={[
+              {
+                key: "fallback",
+                label: (
+                  <span style={{ fontSize: 12.5, color: "#64748b" }}>
+                    高级：备用模型（主模型故障时顶上）
+                  </span>
+                ),
+                children: (
+                  <AutoComplete
+                    style={{ width: "100%" }}
+                    value={fallback}
+                    onChange={setFallback}
+                    options={models.map((m) => ({ value: m }))}
+                    placeholder="留空 = 不用备用"
+                    filterOption={(input, option) =>
+                      (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+                    }
+                  />
+                ),
+              },
+            ]}
+          />
+        )}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 12.5 }}>
+            {!current && !dirty && <Typography.Text type="secondary">尚未配置</Typography.Text>}
+            {current && !dirty && current.last_test_ok === true && (
+              <span style={{ color: "#52C41A" }}>
+                <CheckCircleFilled /> 生效中 · 连接正常 · {fromNow(current.last_test_at)}
+              </span>
+            )}
+            {current && !dirty && current.last_test_ok === false && (
+              <span style={{ color: "#F5222D" }}>
+                <CloseCircleFilled /> 生效中 · 连接异常 · {fromNow(current.last_test_at)}
+              </span>
+            )}
+            {current && !dirty && current.last_test_ok == null && (
+              <Typography.Text type="secondary">生效中 · 未测试</Typography.Text>
+            )}
+            {dirty && <Typography.Text type="warning">修改未保存</Typography.Text>}
+          </span>
+          <Button
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            loading={saving}
+            disabled={!providerId || !model.trim() || (!dirty && !!current)}
+            onClick={save}
+          >
+            保存并生效
+          </Button>
+        </div>
+        {role === "embed" && (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            ⚠ 更换检索模型后，需到「知识库」对所有文档重建索引（首次配置无需操作）。
+            保存时会自动校验模型能否输出 1536 维向量，不合适会直接报错。
+          </Typography.Text>
+        )}
+        {role === "chat" && selected && presetFor(selected)?.note && (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            💡 {presetFor(selected)?.note}
+          </Typography.Text>
+        )}
+      </Space>
+    </Card>
+  );
+}
+
 export default function SettingsPage() {
   const { message } = App.useApp();
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -115,32 +330,8 @@ export default function SettingsPage() {
   const [editing, setEditing] = useState<Provider | null>(null);
   const [testing, setTesting] = useState<number | null>(null);
   const [preset, setPreset] = useState<ProviderPreset | null>(null);
-  const [models, setModels] = useState<string[]>([]);
-  const [fetchingModels, setFetchingModels] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [form] = Form.useForm();
-
-  const fetchModels = async () => {
-    const base_url = form.getFieldValue("base_url");
-    const api_key = form.getFieldValue("api_key");
-    if (!base_url || (!api_key && !editing)) {
-      message.info("请先填写 Base URL 和 API Key");
-      return;
-    }
-    setFetchingModels(true);
-    try {
-      const body = editing
-        ? { provider_id: editing.id, api_key: api_key || undefined }
-        : { base_url, api_key };
-      const data = await api.post<{ items: string[] }>("/api/settings/llm-providers/models", body);
-      setModels(data.items);
-      message.success(`拉取到 ${data.items.length} 个模型，输入框已变为可搜索下拉`);
-    } catch (e) {
-      message.error(e instanceof ApiError ? e.message : "拉取失败");
-    } finally {
-      setFetchingModels(false);
-    }
-  };
 
   const load = useCallback(async () => {
     const data = await api.get<{ items: Provider[] }>("/api/settings/llm-providers");
@@ -154,7 +345,6 @@ export default function SettingsPage() {
   const openModal = (provider: Provider | null) => {
     setEditing(provider);
     setPreset(null);
-    setModels([]);
     setAdvancedOpen(false);
     form.resetFields();
     if (provider) form.setFieldsValue({ ...provider, api_key: "" });
@@ -162,10 +352,6 @@ export default function SettingsPage() {
   };
 
   const submit = async (values: Record<string, unknown>) => {
-    // AutoComplete 清空后可能是 undefined：归一为 ""，让「清掉对话/检索模型」能真正存下去
-    for (const k of ["chat_model", "fallback_model", "embed_model"]) {
-      if (values[k] === undefined || values[k] === null) values[k] = "";
-    }
     try {
       if (editing) {
         if (!values.api_key) delete values.api_key; // 留空保留原密文
@@ -181,93 +367,85 @@ export default function SettingsPage() {
     }
   };
 
-  const activate = async (id: number) => {
-    try {
-      await api.post(`/api/settings/llm-providers/${id}/activate`);
-      message.success("已激活，即时生效（无需重启）");
-      await load();
-    } catch (e) {
-      message.error(e instanceof ApiError ? e.message : "激活失败");
-    }
-  };
-
   const test = async (id: number) => {
     setTesting(id);
     try {
-      const result = await api.post<{ ok: boolean; latency_ms: number; error: string | null }>(
+      const r = await api.post<{ ok: boolean; error: string | null }>(
         `/api/settings/llm-providers/${id}/test`,
+        {},
       );
-      if (result.ok) message.success(`连接正常，延迟 ${result.latency_ms}ms`);
-      else message.error(`连接失败：${result.error}`);
+      if (r.ok) message.success("连接正常");
+      else message.error(`测试失败：${r.error ?? "未知错误"}`, 8);
       await load();
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "测试失败");
     } finally {
       setTesting(null);
     }
   };
 
+  const chatCurrent = providers.find((p) => p.is_active);
+  const embedCurrent = providers.find((p) => p.is_embed_active);
+
   return (
     <div>
       <PageHeader
         title="模型配置"
-        subtitle="选择 AI 服务商、粘贴密钥并激活——机器人就用它来回答问题；随时切换、即时生效"
+        subtitle="三步配完：添加服务商密钥 → 选对话模型 → 选检索模型；对话和检索可以来自不同服务商"
         extra={
           <Button type="primary" icon={<PlusOutlined />} onClick={() => openModal(null)}>
-            新增供应商
+            添加服务商
           </Button>
         }
       />
-      <Card styles={{ body: { paddingTop: 8 } }}>
+
+      <Card
+        title={
+          <Space size={8}>
+            <Tag color="blue" style={{ marginRight: 0 }}>
+              第一步
+            </Tag>
+            服务商与密钥
+            <Typography.Text type="secondary" style={{ fontSize: 12.5, fontWeight: 400 }}>
+              把要用的每家服务商的 API Key 存进来
+            </Typography.Text>
+          </Space>
+        }
+        styles={{ body: { paddingTop: 8 } }}
+      >
         <Table<Provider>
+          size="middle"
           rowKey="id"
           dataSource={providers}
           pagination={false}
-          locale={{
-            emptyText: (
-              <div style={{ padding: "32px 0", textAlign: "center", color: "#94a3b8" }}>
-                <ApiOutlined style={{ fontSize: 32, marginBottom: 12, display: "block", margin: "0 auto 12px" }} />
-                还没有配置模型供应商——新增并激活后，机器人即可开始回答
-              </div>
-            ),
-          }}
+          locale={{ emptyText: "还没有服务商——点右上角「添加服务商」，选一家、贴上 Key 即可" }}
           columns={[
             {
-              title: "供应商",
-              width: 200,
+              title: "服务商",
               render: (_, p) => (
-                <Space>
-                  {p.is_active ? <Badge status="processing" /> : <Badge status="default" />}
-                  <div style={{ lineHeight: 1.3 }}>
-                    <div style={{ fontWeight: 550 }}>
-                      {p.name}
-                      {p.is_active && (
-                        <Tag color="green" style={{ marginLeft: 8 }}>
-                          使用中
-                        </Tag>
-                      )}
-                    </div>
-                    <div style={{ fontSize: 12, color: "#94a3b8" }}>{p.base_url}</div>
-                  </div>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{p.name}</div>
+                  <div style={{ fontSize: 12, color: "#94a3b8" }}>{p.base_url}</div>
+                </div>
+              ),
+            },
+            { title: "密钥", dataIndex: "api_key_masked", width: 100 },
+            {
+              title: "当前用途",
+              width: 150,
+              render: (_, p) => (
+                <Space size={4}>
+                  {p.is_active && <Tag color="blue">对话中</Tag>}
+                  {p.is_embed_active && <Tag color="purple">检索中</Tag>}
+                  {!p.is_active && !p.is_embed_active && (
+                    <span style={{ color: "#cbd5e1", fontSize: 12.5 }}>未使用</span>
+                  )}
                 </Space>
               ),
             },
             {
-              title: "对话模型",
-              dataIndex: "chat_model",
-              width: 160,
-              render: (v: string) =>
-                v || <span style={{ color: "#cbd5e1" }}>未配置</span>,
-            },
-            {
-              title: "知识库检索模型",
-              dataIndex: "embed_model",
-              width: 180,
-              render: (v: string | null) =>
-                v ?? <span style={{ color: "#cbd5e1" }}>未配置</span>,
-            },
-            { title: "密钥", dataIndex: "api_key_masked", width: 90 },
-            {
               title: "连接",
-              width: 130,
+              width: 140,
               render: (_, p) =>
                 p.last_test_at ? (
                   p.last_test_ok ? (
@@ -285,20 +463,9 @@ export default function SettingsPage() {
             },
             {
               title: "操作",
-              width: 250,
+              width: 180,
               render: (_, p) => (
                 <Space>
-                  {!p.is_active && !!p.chat_model && (
-                    <Button
-                      size="small"
-                      type="primary"
-                      ghost
-                      icon={<ThunderboltOutlined />}
-                      onClick={() => activate(p.id)}
-                    >
-                      激活
-                    </Button>
-                  )}
                   <Button size="small" loading={testing === p.id} onClick={() => test(p.id)}>
                     测试
                   </Button>
@@ -306,7 +473,7 @@ export default function SettingsPage() {
                     编辑
                   </Button>
                   <Popconfirm
-                    title="确认删除该供应商？"
+                    title="确认删除该服务商？"
                     onConfirm={async () => {
                       try {
                         await api.del(`/api/settings/llm-providers/${p.id}`);
@@ -316,7 +483,12 @@ export default function SettingsPage() {
                       }
                     }}
                   >
-                    <Button size="small" type="text" danger disabled={p.is_active}>
+                    <Button
+                      size="small"
+                      type="text"
+                      danger
+                      disabled={p.is_active || p.is_embed_active}
+                    >
                       删除
                     </Button>
                   </Popconfirm>
@@ -325,17 +497,31 @@ export default function SettingsPage() {
             },
           ]}
         />
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 4 }}>
-          「使用中」的那家负责对话，同一时间只有一家——点「激活」即切换，立即生效；
-          知识库检索模型配在任意一家上即可（无需激活），对话和检索可以来自不同服务商。
-          建议先「测试」确认连接正常再激活；更换知识库检索模型后，需到「知识库」对所有文档重建索引。
-        </Typography.Paragraph>
       </Card>
+
+      <Row gutter={16} style={{ marginTop: 16 }}>
+        <Col xs={24} lg={12} style={{ marginBottom: 16 }}>
+          <RoleCard
+            key={`chat-${chatCurrent?.id ?? 0}-${chatCurrent?.chat_model ?? ""}-${chatCurrent?.fallback_model ?? ""}`}
+            role="chat"
+            providers={providers}
+            onSaved={load}
+          />
+        </Col>
+        <Col xs={24} lg={12} style={{ marginBottom: 16 }}>
+          <RoleCard
+            key={`embed-${embedCurrent?.id ?? 0}-${embedCurrent?.embed_model ?? ""}`}
+            role="embed"
+            providers={providers}
+            onSaved={load}
+          />
+        </Col>
+      </Row>
 
       <UsageCard />
 
       <Modal
-        title={editing ? `编辑：${editing.name}` : "新增供应商"}
+        title={editing ? `编辑：${editing.name}` : "添加服务商"}
         open={modalOpen}
         onCancel={() => setModalOpen(false)}
         onOk={() => form.submit()}
@@ -356,12 +542,9 @@ export default function SettingsPage() {
                 onChange={(i: number) => {
                   const p = PROVIDER_PRESETS[i];
                   setPreset(p);
-                  setModels([]);
                   form.setFieldsValue({
                     name: p.label.split("（")[0],
                     base_url: p.base_url,
-                    chat_model: p.chat_model,
-                    embed_model: p.embed_model,
                     supports_json_schema: p.supports_json_schema,
                   });
                 }}
@@ -383,44 +566,9 @@ export default function SettingsPage() {
           >
             <Input.Password placeholder="sk-…" />
           </Form.Item>
-          <Form.Item
-            name="chat_model"
-            label={
-              <Space size={8}>
-                对话模型
-                <Button
-                  size="small"
-                  type="link"
-                  loading={fetchingModels}
-                  onClick={fetchModels}
-                  style={{ padding: 0 }}
-                >
-                  拉取模型列表
-                </Button>
-              </Space>
-            }
-            extra="仅做知识库检索的供应商可留空（留空则不可激活为对话供应商）"
-          >
-            <AutoComplete
-              options={models.map((m) => ({ value: m }))}
-              placeholder="选模板已自动填；贴上 Key 后可拉取列表选择"
-              filterOption={(input, option) =>
-                (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-              }
-            />
-          </Form.Item>
-          <Form.Item
-            name="embed_model"
-            label="知识库检索模型（机器人靠它搜索知识库；配在任意一家即可，无需激活）"
-          >
-            <AutoComplete
-              options={models.map((m) => ({ value: m }))}
-              placeholder="OpenAI 填 text-embedding-3-small；留空 = 用别家或系统默认"
-              filterOption={(input, option) =>
-                (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-              }
-            />
-          </Form.Item>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            保存后，到下方「对话模型」「知识库检索模型」里选用这家服务商。
+          </Typography.Text>
 
           <Collapse
             ghost
@@ -451,16 +599,11 @@ export default function SettingsPage() {
                     >
                       <Input placeholder="https://api.deepseek.com/v1" />
                     </Form.Item>
-                    <Form.Item name="fallback_model" label="备用模型（可选，主模型故障时顶上）">
-                      <AutoComplete
-                        options={models.map((m) => ({ value: m }))}
-                        placeholder="留空 = 不用备用"
-                        filterOption={(input, option) =>
-                          (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
-                        }
-                      />
-                    </Form.Item>
-                    <Form.Item name="supports_json_schema" valuePropName="checked" initialValue={true}>
+                    <Form.Item
+                      name="supports_json_schema"
+                      valuePropName="checked"
+                      initialValue={true}
+                    >
                       <Checkbox>支持结构化输出（选模板时已自动设置）</Checkbox>
                     </Form.Item>
                   </>

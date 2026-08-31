@@ -597,8 +597,8 @@ revive_count+1、last_revived_at、audit，并 touch last_message_at（自然进
 
 - 基于 `openai` SDK。配置经 `ProviderConfigSource` 协议解析，优先级：**DB 激活供应商（llm_providers.is_active）→ env 兜底**（`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_CHAT_MODEL`/`LLM_CHAT_MODEL_FALLBACK`）。M1–M7 只有 `EnvConfigSource`；M8 加 `DbConfigSource`：进程内缓存 60s + 激活/修改时 Redis pub/sub 广播失效，worker 无需重启即热切换。
 - api_key 存库用 Fernet 加密（`cryptography`），主密钥 `SETTINGS_ENCRYPTION_KEY` 仅在 env；任何 API 响应与日志只出现末 4 位。
-- embedding 也可后台配（`llm_providers.embed_model`）且**与对话解耦**（2026-08-31 修订）：`ProviderSource.get_embed()` 独立解析——激活供应商的 embed_model → 任一配了 embed_model 的（未激活）供应商（`is_active desc, updated_at desc` 取一）→ env 兜底。对话与检索因此可来自不同供应商（如智谱管对话 + 硅基流动管检索），检索模型配在任意一行供应商上即可，激活只决定谁来对话。`chat_model` 允许为空（仅检索供应商），空 chat_model 的行不可激活（API 409 + 前端隐藏按钮）。
-- embedding 请求始终携带 `dimensions=1536`：Matryoshka 模型（Qwen3-Embedding 系列等原生非 1536 维）按参数输出目标维度；上游拒绝该参数时自动降级为不带参重试并记住结论（原生 1536 维模型不受影响）。运行时维度守卫拒绝非 1536 维向量（换维度需全量重索引）；供应商「测试」按钮对配置的对话/检索模型分别实测，检索测试含维度校验，选错模型当场报错。
+- **双槽位模型配置**（2026-08-31 修订，migration 0009）：服务商行只承载凭据（name/base_url/key），"谁来对话"与"谁来检索"是两个显式槽位——`is_active` = 对话槽、`is_embed_active` = 检索槽（各有 partial unique index，租户内至多一个），可指向不同服务商（如智谱管对话 + 硅基流动管检索）。指派走 `PUT /api/settings/llm-providers/roles/{chat|embed}`（body：provider_id + model，写入行的 chat_model/embed_model 并翻转槽位标志，广播失效热生效）；`ProviderSource.get_embed()` 解析：检索槽行 → env 兜底。担任槽位的服务商不可删除（409）。后台页面为三步布局：①服务商密钥表 ②对话槽卡片 ③检索槽卡片，各槽位下拉选服务商+模型，保存后自动连接测试。
+- embedding 请求始终携带 `dimensions=1536`：Matryoshka 模型（Qwen3-Embedding 系列等原生非 1536 维）按参数输出目标维度；上游拒绝该参数时自动降级为不带参重试并记住结论（原生 1536 维模型不受影响）。运行时维度守卫拒绝非 1536 维向量（换维度需全量重索引）。「测试」只测该行实际承担的用途（对话槽测对话、检索槽测 embedding 含维度校验，未担用途测密钥连通性 list_models），避免残留模型字段误报失败。
 - 统一封装 `chat(messages, schema=None, purpose="rag|triage|extract|summary")`，按 purpose 分两档策略：
   - **用户回复路径**（triage/rag）：共享端到端 deadline（`REPLY_DEADLINE_S`，默认 5s）——triage 上限 2s 且计入总预算，RAG 生成获得剩余时间；不做同调用重试、不切 fallback，超时或失败立即降级（triage 按默认值继续、RAG 走拒答转人工）；
   - **非用户路径**（extract / summary / 索引，超时 30s）：重试 1 次，连续失败切 fallback 模型；

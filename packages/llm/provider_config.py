@@ -110,10 +110,10 @@ class ProviderSource:
         return config
 
     async def get_embed(self) -> EmbedConfig | None:
-        """embedding 配置独立解析：激活供应商优先，其次任一配了检索模型的供应商，最后 env。
+        """embedding 配置独立解析：检索槽（is_embed_active 行）→ env 兜底。
 
-        对话与检索因此可以不同家（如智谱管对话 + 硅基流动管检索）——检索模型
-        配在任意一行供应商上即可，无需激活（激活只决定谁来对话）。
+        对话槽（is_active）与检索槽（is_embed_active）是两个独立选择，
+        可以指向不同服务商（如智谱管对话 + 硅基流动管检索）。
         """
         if (
             self._embed_cache is not None
@@ -155,12 +155,7 @@ class ProviderSource:
         try:
             async with self._session_factory() as session:
                 row = (
-                    await session.execute(
-                        select(LlmProvider)
-                        .where(LlmProvider.embed_model.is_not(None))
-                        .order_by(LlmProvider.is_active.desc(), LlmProvider.updated_at.desc())
-                        .limit(1)
-                    )
+                    await session.execute(select(LlmProvider).where(LlmProvider.is_embed_active))
                 ).scalar_one_or_none()
             if row is not None and row.embed_model:
                 return EmbedConfig(

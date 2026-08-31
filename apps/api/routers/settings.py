@@ -29,6 +29,7 @@ def _provider_out(p: LlmProvider) -> dict[str, Any]:
         "embed_model": p.embed_model,
         "supports_json_schema": p.supports_json_schema,
         "is_active": p.is_active,
+        "is_embed_active": p.is_embed_active,
         "last_test_at": p.last_test_at.isoformat() if p.last_test_at else None,
         "last_test_ok": p.last_test_ok,
     }
@@ -157,36 +158,74 @@ async def patch_provider(request: Request, provider_id: int, body: ProviderPatch
         return _provider_out(provider)
 
 
-@router.post("/{provider_id}/activate", dependencies=AdminWrite)
-async def activate_provider(request: Request, provider_id: int) -> dict[str, Any]:
-    """激活（全局唯一）并广播失效——worker 不重启即切换（M8 验收项）。"""
+class RoleAssign(BaseModel):
+    """槽位选择（§12 双槽位）：哪家服务商 + 哪个模型承担该用途。"""
+
+    provider_id: int
+    model: str
+    fallback_model: str | None = None  # 仅对话槽使用
+
+
+@router.put("/roles/chat", dependencies=AdminWrite)
+async def assign_chat_role(request: Request, body: RoleAssign) -> dict[str, Any]:
+    """对话槽：谁来回答客户。全局唯一，保存即热生效（广播失效，worker 不重启）。"""
+    model = body.model.strip()
+    if not model:
+        raise HTTPException(status_code=422, detail="请选择对话模型")
     async with request.app.state.session_factory() as session:
-        provider = await session.get(LlmProvider, provider_id)
+        provider = await session.get(LlmProvider, body.provider_id)
         if provider is None:
             raise HTTPException(status_code=404)
-        if not provider.chat_model:
-            raise HTTPException(
-                status_code=409,
-                detail="该供应商未配置对话模型，不能激活——只做知识库检索的供应商无需激活",
-            )
         await session.execute(update(LlmProvider).values(is_active=False))
         provider.is_active = True
+        provider.chat_model = model
+        if body.fallback_model is not None:
+            provider.fallback_model = body.fallback_model.strip() or None
+        provider.updated_at = func.now()  # type: ignore[assignment]
         await repositories.add_audit(
             session,
             "admin",
-            "provider_activated",
+            "chat_role_assigned",
             "llm_provider",
             provider.id,
-            {"name": provider.name},
+            {"name": provider.name, "model": model},
         )
         await session.commit()
     await publish_invalidation(request.app.state.redis)
-    return {"ok": True, "active_id": provider_id}
+    return {"ok": True}
+
+
+@router.put("/roles/embed", dependencies=AdminWrite)
+async def assign_embed_role(request: Request, body: RoleAssign) -> dict[str, Any]:
+    """检索槽：谁来做知识库 embedding。可与对话槽不同家；更换后需重建知识库索引。"""
+    model = body.model.strip()
+    if not model:
+        raise HTTPException(status_code=422, detail="请选择检索模型")
+    async with request.app.state.session_factory() as session:
+        provider = await session.get(LlmProvider, body.provider_id)
+        if provider is None:
+            raise HTTPException(status_code=404)
+        await session.execute(update(LlmProvider).values(is_embed_active=False))
+        provider.is_embed_active = True
+        provider.embed_model = model
+        provider.updated_at = func.now()  # type: ignore[assignment]
+        await repositories.add_audit(
+            session,
+            "admin",
+            "embed_role_assigned",
+            "llm_provider",
+            provider.id,
+            {"name": provider.name, "model": model},
+        )
+        await session.commit()
+    await publish_invalidation(request.app.state.redis)
+    return {"ok": True}
 
 
 @router.post("/{provider_id}/test", dependencies=AdminWrite)
 async def test_provider(request: Request, provider_id: int) -> dict[str, Any]:
-    """最小真实调用（§10）：配了对话模型测对话，配了检索模型测 embedding（含 1536 维校验），
+    """最小真实调用（§10）：只测该服务商实际承担的用途——对话槽测对话，检索槽测
+    embedding（含 1536 维校验），未担任何用途时测密钥连通性（拉模型列表）。
     回填 last_test_*，避免填错 key/选错维度等到真实用户消息才发现。"""
     settings = request.app.state.settings
     async with request.app.state.session_factory() as session:
@@ -194,7 +233,8 @@ async def test_provider(request: Request, provider_id: int) -> dict[str, Any]:
         if provider is None:
             raise HTTPException(status_code=404)
         base_url = provider.base_url
-        chat_model, embed_model = provider.chat_model, provider.embed_model
+        chat_model = provider.chat_model if provider.is_active else ""
+        embed_model = (provider.embed_model or "") if provider.is_embed_active else ""
         api_key = decrypt_api_key(settings, provider.api_key_enc)
 
     began = time.monotonic()
@@ -226,8 +266,11 @@ async def test_provider(request: Request, provider_id: int) -> dict[str, Any]:
             ok = False
             errors.append(f"检索模型：{repr(exc)[:200]}")
     if not chat_model and not embed_model:
-        ok = False
-        errors.append("对话模型与检索模型均未配置，无可测试项")
+        try:
+            await request.app.state.list_models(base_url, api_key)
+        except Exception:
+            ok = False
+            errors.append("连接失败：请检查接口地址与 API Key 是否正确")
     error = "；".join(errors) or None
     latency_ms = int((time.monotonic() - began) * 1000)
 
@@ -247,9 +290,9 @@ async def delete_provider(request: Request, provider_id: int) -> dict[str, bool]
         provider = await session.get(LlmProvider, provider_id)
         if provider is None:
             raise HTTPException(status_code=404)
-        if provider.is_active:
+        if provider.is_active or provider.is_embed_active:
             raise HTTPException(
-                status_code=409, detail="激活中的供应商不可删除，请先激活其他供应商"
+                status_code=409, detail="该服务商正承担对话或检索用途，请先在槽位中换成别家"
             )
         await repositories.add_audit(
             session,

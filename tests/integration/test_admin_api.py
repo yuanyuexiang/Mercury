@@ -228,7 +228,7 @@ async def test_url_import_ssrf_blocked(client) -> None:
         assert resp.status_code == 422, bad
 
 
-async def test_provider_crud_activate_and_hot_reload(
+async def test_provider_crud_roles_and_hot_reload(
     client, session_factory, redis_client, settings, monkeypatch
 ) -> None:
     # mock DNS：开发机若开 fake-ip 代理，所有域名会解析进保留网段被 SSRF 校验误拦
@@ -257,8 +257,17 @@ async def test_provider_crud_activate_and_hot_reload(
         assert row.api_key_enc != "sk-test-1234abcd"
         assert decrypt_api_key(settings, row.api_key_enc) == "sk-test-1234abcd"
 
-    resp = await client.post(
-        f"/api/settings/llm-providers/{provider['id']}/activate", headers=WRITE_HEADERS
+    # 双槽位（§12 修订）：对话槽与检索槽各自指派
+    resp = await client.put(
+        "/api/settings/llm-providers/roles/chat",
+        json={"provider_id": provider["id"], "model": "deepseek-chat"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    resp = await client.put(
+        "/api/settings/llm-providers/roles/embed",
+        json={"provider_id": provider["id"], "model": "text-embedding-3-small"},
+        headers=WRITE_HEADERS,
     )
     assert resp.status_code == 200
 
@@ -267,7 +276,8 @@ async def test_provider_crud_activate_and_hot_reload(
     config = await source.get()
     assert config is not None and config.source == "db"
     assert config.chat_model == "deepseek-chat" and config.api_key == "sk-test-1234abcd"
-    assert config.embed_model == "text-embedding-3-small"  # 后台可配 embedding（§12 修订）
+    embed = await source.get_embed()
+    assert embed is not None and embed.embed_model == "text-embedding-3-small"
 
     # 测试连接（Fake chat 工厂）
     resp = await client.post(
@@ -285,13 +295,13 @@ async def test_provider_crud_activate_and_hot_reload(
 async def test_embedding_only_provider_cross_vendor(
     client, session_factory, redis_client, settings, monkeypatch
 ) -> None:
-    """§12 修订：对话与检索可不同家——检索模型配在未激活供应商上也能被解析。"""
+    """§12 双槽位：对话槽与检索槽指向不同服务商（智谱对话 + 硅基流动检索）。"""
     monkeypatch.setattr(
         "integrations.netguard.socket.getaddrinfo",
         lambda host, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))],
     )
     await _login(client)
-    # 对话供应商（无检索模型）+ 仅检索供应商（无对话模型）
+    # 两家服务商只存密钥，不带模型
     chat_provider = (
         await client.post(
             "/api/settings/llm-providers",
@@ -299,7 +309,6 @@ async def test_embedding_only_provider_cross_vendor(
                 "name": "智谱",
                 "base_url": "https://open.bigmodel.cn/api/paas/v4",
                 "api_key": "sk-chat-key",
-                "chat_model": "glm-4.7",
             },
             headers=WRITE_HEADERS,
         )
@@ -311,34 +320,48 @@ async def test_embedding_only_provider_cross_vendor(
                 "name": "硅基流动",
                 "base_url": "https://api.siliconflow.cn/v1",
                 "api_key": "sk-embed-key",
-                "chat_model": "",
-                "embed_model": "Qwen/Qwen3-Embedding-8B",
             },
             headers=WRITE_HEADERS,
         )
     ).json()
 
-    # 仅检索的供应商不可激活为对话供应商
+    # 未担任何用途的服务商：「测试」= 密钥连通性（走 list_models 桩）
     resp = await client.post(
-        f"/api/settings/llm-providers/{embed_provider['id']}/activate", headers=WRITE_HEADERS
+        f"/api/settings/llm-providers/{embed_provider['id']}/test", headers=WRITE_HEADERS
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 200 and resp.json()["ok"] is True
 
-    # 激活对话供应商后：chat 走激活行，embedding 解析到未激活的检索行
-    resp = await client.post(
-        f"/api/settings/llm-providers/{chat_provider['id']}/activate", headers=WRITE_HEADERS
+    # 槽位指派：模型为空拒绝；正常指派后两槽位各自生效
+    resp = await client.put(
+        "/api/settings/llm-providers/roles/chat",
+        json={"provider_id": chat_provider["id"], "model": "  "},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 422
+    resp = await client.put(
+        "/api/settings/llm-providers/roles/chat",
+        json={"provider_id": chat_provider["id"], "model": "glm-4.7"},
+        headers=WRITE_HEADERS,
     )
     assert resp.status_code == 200
+    resp = await client.put(
+        "/api/settings/llm-providers/roles/embed",
+        json={"provider_id": embed_provider["id"], "model": "Qwen/Qwen3-Embedding-8B"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+
     source = ProviderSource(session_factory, redis_client, settings)
     config = await source.get()
     assert config is not None and config.chat_model == "glm-4.7"
+    assert config.api_key == "sk-chat-key"
     embed = await source.get_embed()
     assert embed is not None and embed.source == "db"
     assert embed.embed_model == "Qwen/Qwen3-Embedding-8B"
     assert embed.api_key == "sk-embed-key"
     assert embed.base_url == "https://api.siliconflow.cn/v1"
 
-    # 「测试」对仅检索供应商测 embedding：1536 维通过，非 1536 维给明确报错
+    # 担任检索槽的服务商：「测试」只测 embedding——1536 维通过，非 1536 维给明确报错
     resp = await client.post(
         f"/api/settings/llm-providers/{embed_provider['id']}/test", headers=WRITE_HEADERS
     )
@@ -351,6 +374,12 @@ async def test_embedding_only_provider_cross_vendor(
     )
     body = resp.json()
     assert body["ok"] is False and "4096" in (body["error"] or "")
+
+    # 承担用途中的服务商不可删除
+    resp = await client.delete(
+        f"/api/settings/llm-providers/{embed_provider['id']}", headers=WRITE_HEADERS
+    )
+    assert resp.status_code == 409
 
 
 async def test_provider_source_env_fallback_and_invalidate(

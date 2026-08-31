@@ -159,11 +159,11 @@ async def setup_status(request: Request) -> dict[str, Any]:
             await session.execute(
                 select(func.count())
                 .select_from(LlmProvider)
-                .where(LlmProvider.embed_model.is_not(None))
+                .where(LlmProvider.is_embed_active, LlmProvider.embed_model.is_not(None))
             )
         ).scalar() or 0
-    # 知识库检索（embedding）可用性：任一供应商配了检索模型（无需激活，对话与检索
-    # 可不同家），或 env 有兜底 key——缺失时上传的文档无法索引，界面必须显式警告
+    # 知识库检索（embedding）可用性：检索槽已选定服务商（可与对话槽不同家），
+    # 或 env 有兜底 key——缺失时上传的文档无法索引，界面必须显式警告
     embedding_ready = bool(embed_providers or settings.llm_api_key)
     return {
         "telegram": bool(await store.telegram_bot_token()),

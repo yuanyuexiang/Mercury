@@ -317,12 +317,18 @@ class IntegrationJob(Base):
 class LlmProvider(Base):
     __tablename__ = "llm_providers"
     __table_args__ = (
-        # 全局至多一个激活供应商（§4）
+        # 双槽位（§12 修订）：is_active = 对话槽，is_embed_active = 检索槽，各至多一个
         Index(
             "one_active_provider",
             "tenant_id",
             unique=True,
             postgresql_where=text("is_active"),
+        ),
+        Index(
+            "one_embed_active_provider",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("is_embed_active"),
         ),
     )
 
@@ -339,6 +345,10 @@ class LlmProvider(Base):
         Boolean, nullable=False, server_default=text("true")
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # 检索槽（§12 修订）：知识库 embedding 用这一行的 embed_model，可与对话槽不同家
+    is_embed_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(
