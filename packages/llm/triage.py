@@ -9,10 +9,13 @@ TRIAGE_TIMEOUT_CAP_S = 2.0
 
 
 async def run_triage(
-    chat: ChatClient, history: list[dict[str, str]], deadline: Deadline
+    chat: ChatClient,
+    history: list[dict[str, str]],
+    deadline: Deadline,
+    cap_s: float = TRIAGE_TIMEOUT_CAP_S,
 ) -> TriageResult:
     """失败/超时由调用方降级为默认值（needs_rag=True, risk=none），此处只管调用。"""
-    timeout = min(TRIAGE_TIMEOUT_CAP_S, deadline.remaining())
+    timeout = min(cap_s, deadline.remaining())
     if timeout <= 0.1:
         raise TimeoutError("triage 预算耗尽")
     messages: list[dict[str, str]] = [{"role": "system", "content": TRIAGE_SYSTEM}, *history[-6:]]

@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     rag_min_similarity: float = 0.60
     rag_top_k: int = 6
     reply_deadline_s: float = 5.0
+    # triage 单独上限（计入总预算）：默认 2s 适配快模型；DeepSeek-V3 等出 JSON 慢的调到 4–5
+    triage_timeout_s: float = 2.0
 
     # 数据
     database_url: str = "postgresql+asyncpg://mercury:mercury@localhost:55432/mercury"

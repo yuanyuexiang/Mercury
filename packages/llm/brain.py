@@ -29,7 +29,9 @@ class RagBrain:
         self._branding = branding
 
     async def triage(self, history: list[dict[str, str]], deadline: Deadline) -> TriageResult:
-        return await run_triage(self._chat, history, deadline)
+        return await run_triage(
+            self._chat, history, deadline, cap_s=self._settings.triage_timeout_s
+        )
 
     async def answer(
         self,
