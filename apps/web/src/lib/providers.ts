@@ -47,7 +47,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     embed_model: "Qwen/Qwen3-Embedding-8B",
     supports_json_schema: false,
     keyUrl: "https://cloud.siliconflow.cn/account/ak",
-    note: "国内聚合站，开源模型全，国内网络友好；Qwen3-Embedding 可做知识库检索",
+    note: "国内聚合站，开源模型全，国内网络友好；对话推荐 DeepSeek-V3（非思考、快），Qwen3-Embedding 可做知识库检索",
   },
   {
     label: "Moonshot Kimi",
@@ -65,7 +65,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     embed_model: "",
     supports_json_schema: false,
     keyUrl: "https://open.bigmodel.cn/usercenter/apikeys",
-    note: "glm-4-flash 免费额度大，适合试用",
+    note: "对话只推荐 glm-4-flash（免费额度大）；4.7/5.x 系列（含 flash）默认深度思考，出话十几秒，不适合客服",
   },
   {
     label: "阿里云通义（DashScope）",

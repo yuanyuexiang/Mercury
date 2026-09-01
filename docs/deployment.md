@@ -131,7 +131,9 @@ curl -s "https://api.telegram.org/bot<TOKEN>/getWebhookInfo" | python3 -m json.t
 | 知识库永远拒答 | 文档已启用仍回"无法从官方资料确认"，英文提问尤甚 | 相似度阈值 0.60 按 OpenAI embedding 调，Qwen3-Embedding 分布整体偏低，跨语言更低 | `.env` 设 `RAG_MIN_SIMILARITY=0.45`（换 embedding 模型后用容器内诊断脚本实测 top 分数再定）|
 | 生成必超时 | 检索命中但 `llm_chat_attempt_failed purpose=rag` → TimeoutError | **对话槽误选深度思考型模型**（glm-4.7 等），出话十几秒起步 | 对话模型必须选 flash/turbo 级快速模型（glm-4.7-flash 等）；思考型模型不适用客服场景 |
 
-配套调整：`REPLY_DEADLINE_S=10`（跨服务商组合的宽裕预算）。embedding 闲置后首调有数秒冷启动属正常。
+配套调整：`REPLY_DEADLINE_S=10`（跨服务商组合的宽裕预算）；`RAG_TOP_K=10`（不同 embedding 模型排序口味不同，top-6 可能挤掉关键块——实测 Qwen3-Embedding 把定价文档的说明块排在实际价格块之前，导致模型守规矩拒答）。embedding 闲置后首调有数秒冷启动属正常。
+
+**模型选型铁律（2026-09 实测）**：对话槽只能用**非思考型快速模型**——智谱 4.7/5.x 全系（含 flash 后缀）默认深度思考，出话 10 秒+，必超时；可用：glm-4-flash（免费、偏弱）、SiliconFlow 的 deepseek-ai/DeepSeek-V3（推荐）。换 embedding 模型后要连着验证：阈值（诊断脚本看 top 分数）+ top_k（确认关键块入围）。
 
 **容器内检索诊断**（打印 top-6 相似度与生成结果，定位拒答原因）：
 ```bash
