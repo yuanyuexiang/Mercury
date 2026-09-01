@@ -48,6 +48,17 @@ async def test_answer_roundtrip(session_factory, locker, sender, brain) -> None:
         assert row.status == "done" and row.processed_at is not None
 
 
+async def test_int64_telegram_ids(session_factory, locker, sender, brain) -> None:
+    """回归（生产实測）：现代 Telegram user/chat id 超出 int32（如 7606380623），
+    顺序守卫的 JSONB chat id 比较必须按 BIGINT 处理，否则真实用户全量卡死。"""
+    big_id = 7_606_380_623
+    first = await _seed(session_factory, tg_update(201, "你好", chat_id=big_id, user_id=big_id))
+    second = await _seed(session_factory, tg_update(202, "在吗", chat_id=big_id, user_id=big_id))
+    assert await run_process_update(session_factory, locker, sender, brain, first) == "done"
+    assert await run_process_update(session_factory, locker, sender, brain, second) == "done"
+    assert [chat for chat, _ in sender.sent] == [big_id, big_id]
+
+
 async def test_rerun_is_noop(session_factory, locker, sender, brain) -> None:
     """原子抢占：done 后再跑同一 update → duplicate，不重发。"""
     uid = await _seed(session_factory, tg_update(102, "hi"))

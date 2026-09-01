@@ -7,7 +7,8 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, func, select, text, update
+from sqlalchemy import BigInteger, CursorResult, func, select, text, update
+from sqlalchemy import cast as sa_cast
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -742,14 +743,19 @@ async def reset_expired_extracting(session: AsyncSession, lease_minutes: int = 5
 async def has_earlier_pending_update(
     session: AsyncSession, chat_id: int, before_update_id: int
 ) -> bool:
-    """同 chat 是否存在更早的未完成 update（第三轮评审：会话内按序处理的守卫）。"""
+    """同 chat 是否存在更早的未完成 update（第三轮评审：会话内按序处理的守卫）。
+
+    chat id 必须按 BIGINT 处理：现代 Telegram 的 user/chat id 已超出 int32
+    （如 7606380623），as_integer() 的 INTEGER cast 会在真实用户上直接报错。
+    """
     stmt = (
         select(func.count())
         .select_from(TelegramUpdate)
         .where(
             TelegramUpdate.update_id < before_update_id,
             TelegramUpdate.status.in_(["queued", "processing"]),
-            TelegramUpdate.payload["message"]["chat"]["id"].as_integer() == chat_id,
+            sa_cast(TelegramUpdate.payload["message"]["chat"]["id"].as_string(), BigInteger)
+            == chat_id,
         )
     )
     return bool((await session.execute(stmt)).scalar())
