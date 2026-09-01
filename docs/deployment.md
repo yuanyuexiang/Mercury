@@ -120,3 +120,44 @@ curl -s "https://api.telegram.org/bot<TOKEN>/getWebhookInfo" | python3 -m json.t
 | 回复"系统暂未就绪" | LLM 未配置：`.env` 填 `LLM_API_KEY`/`LLM_CHAT_MODEL`，或后台「模型配置」激活供应商 |
 | 收不到人工提醒 | 运营者/群从未给 bot 发过消息，或 `OPERATOR_TELEGRAM_CHAT_ID` 填错（群是负数） |
 | 之前用过轮询 | `setWebhook` 会自动替换轮询模式，无需手动 `deleteWebhook` |
+
+## 附二：真实流量调优实录（2026-09-01 首个真实用户排查沉淀）
+
+首次接真实流量暴露的三个问题及修法——**每个新客户实例上线时都按此检查**：
+
+| 问题 | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| 大 ID 卡死 | 所有消息卡 `processing`，worker 日志 `value out of int32 range` | 现代 Telegram user/chat id 超出 int32（如 76 亿），顺序守卫按 INTEGER 比较 | 已修（repositories.py 按 BIGINT 处理），升级镜像即可 |
+| 知识库永远拒答 | 文档已启用仍回"无法从官方资料确认"，英文提问尤甚 | 相似度阈值 0.60 按 OpenAI embedding 调，Qwen3-Embedding 分布整体偏低，跨语言更低 | `.env` 设 `RAG_MIN_SIMILARITY=0.45`（换 embedding 模型后用容器内诊断脚本实测 top 分数再定）|
+| 生成必超时 | 检索命中但 `llm_chat_attempt_failed purpose=rag` → TimeoutError | **对话槽误选深度思考型模型**（glm-4.7 等），出话十几秒起步 | 对话模型必须选 flash/turbo 级快速模型（glm-4.7-flash 等）；思考型模型不适用客服场景 |
+
+配套调整：`REPLY_DEADLINE_S=10`（跨服务商组合的宽裕预算）。embedding 闲置后首调有数秒冷启动属正常。
+
+**容器内检索诊断**（打印 top-6 相似度与生成结果，定位拒答原因）：
+```bash
+docker compose -f compose.prod.yaml exec -T api python - <<'PYEOF'
+import asyncio
+import redis.asyncio as aioredis
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from domain.config import get_settings
+from llm.provider_config import ProviderSource, DynamicEmbedder
+from llm.rag import retrieve
+
+async def main():
+    s = get_settings()
+    print("阈值 =", s.rag_min_similarity, "| 预算 =", s.reply_deadline_s)
+    engine = create_async_engine(s.database_url)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    r = aioredis.from_url(s.redis_url)
+    emb = DynamicEmbedder(ProviderSource(sf, r, s), s)
+    for q in ["你们怎么收费", "How much does it cost"]:
+        print("=== 查询:", q)
+        async with sf() as session:
+            for c in await retrieve(session, emb, q, 6, 0.0):
+                print(f"  {c.similarity:.3f}  {c.document_title}")
+    await engine.dispose()
+    await r.aclose()
+
+asyncio.run(main())
+PYEOF
+```
