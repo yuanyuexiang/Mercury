@@ -86,6 +86,13 @@ def purchase_ack(lang: str = "") -> str:
     return "Great — I've passed your request to our team and they'll reach out shortly."
 
 
+def casual_ack(lang: str = "") -> str:
+    """已有线索会话里的短消息（"好的/不需要/谢谢"）：轻确认，不自我介绍、不打扰运营。"""
+    if _is_zh(lang):
+        return "好的！有其他问题随时找我。"
+    return "Got it — I'm here if you need anything else."
+
+
 def smalltalk(lang: str = "") -> str:
     if _is_zh(lang):
         return "您好！我是产品客服助手，产品功能、价格、部署方式都可以问我。"

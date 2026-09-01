@@ -27,6 +27,11 @@ class LlmLeadExtractor:
             current_lead=json.dumps(current_lead, ensure_ascii=False, default=str),
             declined=", ".join(declined_fields) if declined_fields else "(none)",
         )
+        # 语言注入（2026-09-01）：泛化的"用户语言"约束对部分模型不够硬，
+        # 从 history 推断后点名语言（中文会话另有编排层守卫兜底）
+        user_text = " ".join(m["content"] for m in history if m["role"] == "user")
+        if any("\u4e00" <= ch <= "\u9fff" for ch in user_text):
+            system += "\nThe customer writes in Chinese. follow_up_question MUST be in Chinese."
         messages: list[dict[str, str]] = [{"role": "system", "content": system}, *history[-10:]]
         result = await self._chat.chat(
             messages, purpose="extract", timeout_s=EXTRACT_TIMEOUT_S, schema=LeadExtraction

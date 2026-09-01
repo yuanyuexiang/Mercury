@@ -176,3 +176,41 @@ async def test_atomic_claim_prevents_duplicate_extraction(
     assert reset_ids == [408]
     outcome, _ = await run_extract_lead(session_factory, locker, sender, extractor, 408)
     assert outcome == "done"
+
+
+async def test_followup_language_guard_and_cooldown(
+    session_factory, locker, sender, brain, extractor
+) -> None:
+    """追问两道闸（2026-09-01 生产实测）：中文会话压制纯英文追问；10 分钟内不重复追问。"""
+    from domain.schemas import LeadExtraction, TriageResult
+
+    brain.triage_result = TriageResult(purchase_intent=True, language="zh")
+    extractor.result = LeadExtraction(
+        company="Gamma", follow_up_question="What's your business email address?"
+    )
+    async with session_factory() as session:
+        await repositories.insert_update(session, 731, tg_update(731, "我想买一套"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 731)
+    sent_before = len(sender.sent)
+    await run_extract_lead(session_factory, locker, sender, extractor, 731)
+    # 英文追问被语言守卫压制：没有新增发送
+    assert len(sender.sent) == sent_before
+
+    # 换中文追问：正常发送；紧接着的第二条因冷却不再追问
+    extractor.result = LeadExtraction(follow_up_question="方便留一个企业邮箱吗？")
+    async with session_factory() as session:
+        await repositories.insert_update(session, 732, tg_update(732, "对，采购用"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 732)
+    await run_extract_lead(session_factory, locker, sender, extractor, 732)
+    assert any("企业邮箱" in text for _, text in sender.sent)
+
+    extractor.result = LeadExtraction(follow_up_question="请问贵公司叫什么名字？")
+    async with session_factory() as session:
+        await repositories.insert_update(session, 733, tg_update(733, "嗯嗯"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 733)
+    sent_before = len(sender.sent)
+    await run_extract_lead(session_factory, locker, sender, extractor, 733)
+    assert len(sender.sent) == sent_before  # 冷却期内不再追问

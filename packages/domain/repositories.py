@@ -740,6 +740,24 @@ async def reset_expired_extracting(session: AsyncSession, lease_minutes: int = 5
     return [row[0] for row in (await session.execute(stmt)).fetchall()]
 
 
+async def recent_followup_exists(
+    session: AsyncSession, conversation_id: int, within_minutes: int = 10
+) -> bool:
+    """追问冷却（§6 第 2 步补充）：近 N 分钟内已发过追问就不再发，防连续消息轰炸。"""
+    cutoff = datetime.now(UTC) - timedelta(minutes=within_minutes)
+    stmt = (
+        select(func.count())
+        .select_from(Message)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.direction == "outbound",
+            Message.delivery_key.like("followup:%"),
+            Message.created_at >= cutoff,
+        )
+    )
+    return bool((await session.execute(stmt)).scalar())
+
+
 async def has_earlier_pending_update(
     session: AsyncSession, chat_id: int, before_update_id: int
 ) -> bool:

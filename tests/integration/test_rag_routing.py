@@ -1,7 +1,7 @@
 """§6 第 3c–3e 步路由分支：拒答、敏感转人工、闲聊、triage 降级、LLM 未配置。"""
 
 from domain import repositories
-from domain.models import Message
+from domain.models import Conversation, Message
 from domain.orchestrator import run_process_update
 from domain.schemas import TriageResult
 from sqlalchemy import select
@@ -96,6 +96,33 @@ async def test_purchase_statement_without_rag_gets_ack_not_smalltalk(
     assert "转给同事" in sender.sent[0][1]
     assert "客服助手" not in sender.sent[0][1]
     assert any("购买意向" in n for n in sender.notices)
+
+
+async def test_existing_lead_short_reply_gets_casual_ack(
+    session_factory, locker, sender, brain
+) -> None:
+    """已有线索后的短消息（"不需要"）：轻确认，绝不重复"已转给同事"+运营通知（生产实测）。"""
+    from domain.schemas import TriageResult
+
+    brain.triage_result = TriageResult(purchase_intent=True, needs_rag=False, language="zh")
+    async with session_factory() as session:
+        await repositories.insert_update(session, 223, tg_update(223, "我想买"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 223)
+    assert "转给同事" in sender.sent[-1][1]  # 首个信号：接单确认
+
+    # 建线索（模拟 extract_lead 已跑）后再来一条短消息
+    async with session_factory() as session:
+        conv = (await session.execute(select(Conversation))).scalar_one()
+        await repositories.get_or_create_lead(session, conv.user_id, conv.id, None)
+        await session.commit()
+    async with session_factory() as session:
+        await repositories.insert_update(session, 224, tg_update(224, "不需要"))
+        await session.commit()
+    notices_before = len(sender.notices)
+    await run_process_update(session_factory, locker, sender, brain, 224)
+    assert "随时找我" in sender.sent[-1][1]  # 轻确认
+    assert len(sender.notices) == notices_before  # 不再重复"购买意向"通知
 
 
 async def test_english_user_gets_english_refusal(session_factory, locker, sender, brain) -> None:

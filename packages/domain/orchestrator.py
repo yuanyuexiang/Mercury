@@ -102,6 +102,10 @@ def _history_from_messages(messages: list[Message]) -> list[dict[str, str]]:
 _CHANNEL_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
+def _has_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
 async def _capture_start_channel(
     session: AsyncSession, conversation: Conversation, stripped_text: str
 ) -> None:
@@ -240,9 +244,9 @@ async def _decide(
         )
 
     if not tri.needs_rag:
-        if tri.purchase_intent:
-            # 纯购买表态（triage 认为无需检索）：绝不能回问候语——
-            # 确认接单，信息收集交给 extract_lead 的追问（§6 第 5 步）
+        if tri.purchase_intent and existing_lead is None:
+            # 首个购买信号（尚无线索）：接单确认 + 通知。purchase_intent 是会话级信号，
+            # 已有线索后的短消息绝不重复确认/通知——"不需要"被回"已转给同事"是真实事故
             return ReplyPlan(
                 messages=[
                     PlannedMessage(
@@ -254,6 +258,18 @@ async def _decide(
                 notify_operator=(
                     f"客户表达购买意向（会话 {conversation.id}）：{text_content[:80]}"
                 ),
+                needs_lead_extraction=True,
+            )
+        if existing_lead is not None:
+            # 已有线索的短消息（应答/致谢类）：轻确认即可，提取任务照常跟进
+            return ReplyPlan(
+                messages=[
+                    PlannedMessage(
+                        delivery_key=f"reply:{update_id}",
+                        text=texts.casual_ack(lang),
+                        sender_type="system",
+                    )
+                ],
                 needs_lead_extraction=True,
             )
         return ReplyPlan(
@@ -276,7 +292,7 @@ async def _decide(
         ans = RagAnswer(refused=True)
 
     if ans.refused or not ans.text:
-        if tri.purchase_intent:
+        if tri.purchase_intent and existing_lead is None:
             # 购买意向的表态（"我想要 X"）不是知识问答：RAG 没东西可"回答"很正常，
             # 但绝不能给客户"答不上来"的观感——确认 + 引导补充信息，
             # 后续由 extract_lead 完成追问/评分/高意向通知（§6 第 5 步）
@@ -635,10 +651,23 @@ async def run_extract_lead(
                         )
                     await session.commit()
 
-                # 追问：仍有缺失关键字段且未被拒绝，且 LLM 给出了问题（§6 第 2 步）
-                if extraction.follow_up_question and lead_merge.missing_key_fields(
-                    merged, declined_all
-                ):
+                # 追问：仍有缺失关键字段且未被拒绝，且 LLM 给出了问题（§6 第 2 步）。
+                # 两道闸（2026-09-01 生产实测）：语言守卫——中文会话绝不发纯英文追问
+                # （提示词约束对部分模型不够硬）；10 分钟冷却——连续消息各自提取时
+                # 不重复轰炸同一个问题
+                followup_ok = bool(
+                    extraction.follow_up_question
+                    and lead_merge.missing_key_fields(merged, declined_all)
+                )
+                if followup_ok:
+                    user_text = " ".join(m["content"] for m in history if m["role"] == "user")
+                    if _has_cjk(user_text) and not _has_cjk(extraction.follow_up_question or ""):
+                        followup_ok = False
+                        logger.warning("followup_language_mismatch_suppressed", update_id=update_id)
+                    elif await repositories.recent_followup_exists(session, conversation.id):
+                        followup_ok = False
+                        logger.info("followup_cooldown_skip", update_id=update_id)
+                if followup_ok:
                     await _deliver(
                         session,
                         sender,
@@ -648,7 +677,8 @@ async def run_extract_lead(
                             messages=[
                                 PlannedMessage(
                                     delivery_key=f"followup:{update_id}",
-                                    text=extraction.follow_up_question,
+                                    # followup_ok 已保证非空；or "" 仅为类型收窄
+                                    text=extraction.follow_up_question or "",
                                 )
                             ]
                         ),
