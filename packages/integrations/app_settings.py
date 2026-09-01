@@ -33,8 +33,16 @@ KEY_BOT_TONE_HINT = "bot_tone_hint"
 KEY_REVIVE_ENABLED = "revive_enabled"
 KEY_REVIVE_AFTER_DAYS = "revive_after_days"
 KEY_REVIVE_MAX_ATTEMPTS = "revive_max_attempts"
+# 回复与检索调优（后台「系统设置」可配；存数字文本，DB 空值回落 env/代码默认）
+KEY_RAG_MIN_SIMILARITY = "rag_min_similarity"
+KEY_RAG_TOP_K = "rag_top_k"
+KEY_REPLY_DEADLINE_S = "reply_deadline_s"
+KEY_TRIAGE_TIMEOUT_S = "triage_timeout_s"
+# Google Sheets 同步（service account JSON 加密存储，与 bot token 同机制）
+KEY_SHEETS_SERVICE_ACCOUNT_JSON = "google_service_account_json"
+KEY_LEADS_SPREADSHEET_ID = "leads_spreadsheet_id"
 
-ENCRYPTED_KEYS = frozenset({KEY_TELEGRAM_BOT_TOKEN})
+ENCRYPTED_KEYS = frozenset({KEY_TELEGRAM_BOT_TOKEN, KEY_SHEETS_SERVICE_ACCOUNT_JSON})
 
 
 def _fernet(settings: Settings) -> Fernet:
@@ -131,6 +139,43 @@ class AppSettingsStore:
 
     async def revive_max_attempts(self) -> int:
         return await self._int_of(KEY_REVIVE_MAX_ATTEMPTS, self._settings.revive_max_attempts, 0, 5)
+
+    async def _float_of(self, key: str, fallback: float, lo: float, hi: float) -> float:
+        raw = await self.get(key)
+        try:
+            return min(hi, max(lo, float(raw))) if raw else fallback
+        except ValueError:
+            return fallback
+
+    # ---- 回复与检索调优（技术方案 §13 调优参数后台化，2026-09-01） ----
+
+    async def rag_min_similarity(self) -> float:
+        return await self._float_of(
+            KEY_RAG_MIN_SIMILARITY, self._settings.rag_min_similarity, 0.0, 1.0
+        )
+
+    async def rag_top_k(self) -> int:
+        return await self._int_of(KEY_RAG_TOP_K, self._settings.rag_top_k, 1, 20)
+
+    async def reply_deadline_s(self) -> float:
+        return await self._float_of(
+            KEY_REPLY_DEADLINE_S, self._settings.reply_deadline_s, 3.0, 60.0
+        )
+
+    async def triage_timeout_s(self) -> float:
+        return await self._float_of(
+            KEY_TRIAGE_TIMEOUT_S, self._settings.triage_timeout_s, 0.5, 20.0
+        )
+
+    # ---- Google Sheets 同步 ----
+
+    async def sheets_service_account_json(self) -> str:
+        return await self.get(
+            KEY_SHEETS_SERVICE_ACCOUNT_JSON, self._settings.google_service_account_json
+        )
+
+    async def leads_spreadsheet_id(self) -> str:
+        return await self.get(KEY_LEADS_SPREADSHEET_ID, self._settings.leads_spreadsheet_id)
 
     # ---- 写入（api 侧） ----
 

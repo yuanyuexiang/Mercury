@@ -13,12 +13,18 @@ from fastapi import APIRouter, HTTPException, Request
 from integrations.app_settings import (
     KEY_BOT_TONE_HINT,
     KEY_BRAND_NAME,
+    KEY_LEADS_SPREADSHEET_ID,
     KEY_OPERATOR_CHAT_ID,
+    KEY_RAG_MIN_SIMILARITY,
+    KEY_RAG_TOP_K,
+    KEY_REPLY_DEADLINE_S,
     KEY_REVIVE_AFTER_DAYS,
     KEY_REVIVE_ENABLED,
     KEY_REVIVE_MAX_ATTEMPTS,
+    KEY_SHEETS_SERVICE_ACCOUNT_JSON,
     KEY_TELEGRAM_BOT_TOKEN,
     KEY_TELEGRAM_BOT_USERNAME,
+    KEY_TRIAGE_TIMEOUT_S,
     publish_invalidation,
 )
 from pydantic import BaseModel
@@ -255,6 +261,142 @@ async def put_revive(request: Request, body: RevivePut) -> dict[str, Any]:
     await store.set_values(values)
     await publish_invalidation(request.app.state.redis)
     return await get_revive(request)
+
+
+@router.get("/tuning", dependencies=AdminRead)
+async def get_tuning(request: Request) -> dict[str, Any]:
+    """回复与检索调优（§13 调优参数后台化）：DB 优先 env/代码默认兜底，保存即热生效。"""
+    store = request.app.state.app_settings_store
+    return {
+        "rag_min_similarity": await store.rag_min_similarity(),
+        "rag_top_k": await store.rag_top_k(),
+        "reply_deadline_s": await store.reply_deadline_s(),
+        "triage_timeout_s": await store.triage_timeout_s(),
+    }
+
+
+class TuningPut(BaseModel):
+    rag_min_similarity: float | None = None  # 0.05–0.95
+    rag_top_k: int | None = None  # 1–20
+    reply_deadline_s: float | None = None  # 3–60
+    triage_timeout_s: float | None = None  # 0.5–20
+
+
+@router.put("/tuning", dependencies=AdminWrite)
+async def put_tuning(request: Request, body: TuningPut) -> dict[str, Any]:
+    store = request.app.state.app_settings_store
+    values: dict[str, str] = {}
+    if body.rag_min_similarity is not None:
+        if not 0.05 <= body.rag_min_similarity <= 0.95:
+            raise HTTPException(status_code=422, detail="相似度阈值需在 0.05–0.95 之间")
+        values[KEY_RAG_MIN_SIMILARITY] = str(body.rag_min_similarity)
+    if body.rag_top_k is not None:
+        if not 1 <= body.rag_top_k <= 20:
+            raise HTTPException(status_code=422, detail="检索条数需在 1–20 之间")
+        values[KEY_RAG_TOP_K] = str(body.rag_top_k)
+    if body.reply_deadline_s is not None:
+        if not 3 <= body.reply_deadline_s <= 60:
+            raise HTTPException(status_code=422, detail="回复预算需在 3–60 秒之间")
+        values[KEY_REPLY_DEADLINE_S] = str(body.reply_deadline_s)
+    if body.triage_timeout_s is not None:
+        if not 0.5 <= body.triage_timeout_s <= 20:
+            raise HTTPException(status_code=422, detail="意图识别上限需在 0.5–20 秒之间")
+        values[KEY_TRIAGE_TIMEOUT_S] = str(body.triage_timeout_s)
+    if not values:
+        raise HTTPException(status_code=422, detail="没有要保存的字段")
+    await store.set_values(values)
+    await publish_invalidation(request.app.state.redis)
+    return await get_tuning(request)
+
+
+@router.get("/sheets", dependencies=AdminRead)
+async def get_sheets(request: Request) -> dict[str, Any]:
+    """Google Sheets 同步配置状态：凭据只回传 client_email，绝不回传私钥。"""
+    from integrations.sheets import parse_service_account
+
+    store = request.app.state.app_settings_store
+    raw = await store.sheets_service_account_json()
+    email = None
+    if raw:
+        try:
+            email = parse_service_account(raw).get("client_email")
+        except ValueError:
+            email = None
+    return {
+        "configured": bool(raw) and bool(await store.leads_spreadsheet_id()),
+        "service_account_email": email,
+        "spreadsheet_id": await store.leads_spreadsheet_id(),
+    }
+
+
+class SheetsPut(BaseModel):
+    service_account_json: str | None = None  # 留空/不传 = 保留原值；粘贴整段 JSON
+    spreadsheet_id: str | None = None
+
+
+@router.put("/sheets", dependencies=AdminWrite)
+async def put_sheets(request: Request, body: SheetsPut) -> dict[str, Any]:
+    from integrations.sheets import parse_service_account
+
+    store = request.app.state.app_settings_store
+    values: dict[str, str] = {}
+    if body.service_account_json:
+        try:
+            parsed = parse_service_account(body.service_account_json)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not parsed.get("client_email") or not parsed.get("private_key"):
+            raise HTTPException(
+                status_code=422,
+                detail="JSON 缺少 client_email / private_key，请粘贴完整的密钥文件内容",
+            )
+        values[KEY_SHEETS_SERVICE_ACCOUNT_JSON] = body.service_account_json.strip()
+    if body.spreadsheet_id is not None:
+        values[KEY_LEADS_SPREADSHEET_ID] = body.spreadsheet_id.strip()
+    if not values:
+        raise HTTPException(status_code=422, detail="没有要保存的字段")
+    await store.set_values(values)
+    await publish_invalidation(request.app.state.redis)
+    async with request.app.state.session_factory() as session:
+        await repositories.add_audit(
+            session,
+            "admin",
+            "sheets_config_updated",
+            "app_setting",
+            0,
+            {"fields": sorted(values)},  # 绝不记录凭据内容
+        )
+        await session.commit()
+    return await get_sheets(request)
+
+
+@router.post("/sheets/test", dependencies=AdminWrite)
+async def test_sheets(request: Request) -> dict[str, Any]:
+    """实测连接：打开表并确保 Leads 工作表与表头就绪，返回表标题。"""
+    import asyncio as _asyncio
+
+    from integrations.sheets import GoogleSheetsLeadSync, parse_service_account
+
+    store = request.app.state.app_settings_store
+    raw = await store.sheets_service_account_json()
+    spreadsheet_id = await store.leads_spreadsheet_id()
+    if not raw or not spreadsheet_id:
+        raise HTTPException(status_code=422, detail="请先保存凭据 JSON 和表 ID")
+    try:
+        sync = GoogleSheetsLeadSync(parse_service_account(raw), spreadsheet_id)
+        title = await _asyncio.wait_for(_asyncio.to_thread(sync.probe), timeout=20)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("sheets_test_failed", error=repr(exc)[:200])
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "连接失败：确认已启用 Google Sheets API，"
+                "且表格已共享给 service account 邮箱（编辑者权限）"
+            ),
+        ) from exc
+    return {"ok": True, "spreadsheet_title": title}
 
 
 @router.get("/general", dependencies=AdminRead)

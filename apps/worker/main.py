@@ -11,7 +11,7 @@ from arq.connections import RedisSettings
 from domain.config import get_settings, validate_production_settings
 from integrations.app_settings import AppSettingsStore
 from integrations.locks import RedisLock
-from integrations.sheets import build_lead_sync
+from integrations.sheets import DynamicLeadSync
 from integrations.telegram import DynamicSender
 from llm.brain import ConversationSummarizer, RagBrain
 from llm.extraction import LlmLeadExtractor
@@ -56,12 +56,21 @@ async def on_startup(ctx: dict[str, Any]) -> None:
     async def _branding() -> tuple[str, str]:
         return await app_settings.brand_name(), await app_settings.bot_tone_hint()
 
+    # 调优参数动态读取（后台「系统设置」可配）：top_k / 相似度阈值 / triage 上限
+    async def _tuning() -> tuple[int, float, float]:
+        return (
+            await app_settings.rag_top_k(),
+            await app_settings.rag_min_similarity(),
+            await app_settings.triage_timeout_s(),
+        )
+
     ctx["brain"] = RagBrain(
-        chat, embedder, settings, branding=_branding
+        chat, embedder, settings, branding=_branding, tuning=_tuning
     )  # 未配置时调用抛 LlmNotConfiguredError，编排层降级
     ctx["extractor"] = LlmLeadExtractor(chat)
     ctx["summarizer"] = ConversationSummarizer(chat)
-    ctx["sync_port"] = build_lead_sync(settings)  # None → 同步任务走 retry 等待配置
+    # Sheets 同步后台可配（DB 优先 env 兜底）：未配置时任务走 retry，配好即恢复
+    ctx["sync_port"] = DynamicLeadSync(app_settings)
 
 
 async def on_shutdown(ctx: dict[str, Any]) -> None:

@@ -21,17 +21,28 @@ class RagBrain:
         embedder: Embedder,
         settings: Settings,
         branding: Callable[[], Awaitable[tuple[str, str]]] | None = None,
+        tuning: Callable[[], Awaitable[tuple[int, float, float]]] | None = None,
     ) -> None:
         self._chat = chat
         self._embedder = embedder
         self._settings = settings
-        # 品牌/语气动态解析（后台可配）；未注入时用 env 静态值
+        # 品牌/语气与调优参数动态解析（后台可配）；未注入时用 env/代码默认静态值
         self._branding = branding
+        # tuning() -> (rag_top_k, rag_min_similarity, triage_timeout_s)
+        self._tuning = tuning
+
+    async def _tuning_values(self) -> tuple[int, float, float]:
+        if self._tuning is not None:
+            return await self._tuning()
+        return (
+            self._settings.rag_top_k,
+            self._settings.rag_min_similarity,
+            self._settings.triage_timeout_s,
+        )
 
     async def triage(self, history: list[dict[str, str]], deadline: Deadline) -> TriageResult:
-        return await run_triage(
-            self._chat, history, deadline, cap_s=self._settings.triage_timeout_s
-        )
+        _, _, triage_cap = await self._tuning_values()
+        return await run_triage(self._chat, history, deadline, cap_s=triage_cap)
 
     async def answer(
         self,
@@ -45,6 +56,7 @@ class RagBrain:
             brand_name, tone_hint = await self._branding()
         else:
             brand_name, tone_hint = self._settings.brand_name, self._settings.bot_tone_hint
+        top_k, min_similarity, _ = await self._tuning_values()
         return await generate_answer(
             session,
             self._embedder,
@@ -53,8 +65,8 @@ class RagBrain:
             history,
             language,
             deadline,
-            top_k=self._settings.rag_top_k,
-            min_similarity=self._settings.rag_min_similarity,
+            top_k=top_k,
+            min_similarity=min_similarity,
             brand_name=brand_name,
             tone_hint=tone_hint,
         )

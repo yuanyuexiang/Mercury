@@ -18,7 +18,7 @@ async def process_update(ctx: dict[str, Any], update_id: int, trace_id: str | No
         ctx["sender"],
         ctx.get("brain"),
         update_id,
-        reply_deadline_s=ctx["settings"].reply_deadline_s,
+        reply_deadline_s=await ctx["app_settings"].reply_deadline_s(),
         brand_name=await ctx["app_settings"].brand_name(),
     )
     if outcome == "locked":

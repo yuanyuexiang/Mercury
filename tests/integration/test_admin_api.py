@@ -389,6 +389,88 @@ async def test_embedding_only_provider_cross_vendor(
     assert config_after is not None and config_after.chat_model == "glm-4.7"
 
 
+async def test_tuning_settings_roundtrip(client, session_factory, redis_client, settings) -> None:
+    """§13 调优参数后台化：GET 默认值 → PUT 覆盖 → store 动态读到新值；越界 422。"""
+    from integrations.app_settings import AppSettingsStore
+
+    await _login(client)
+    defaults = (await client.get("/api/settings/tuning")).json()
+    assert defaults["rag_min_similarity"] == 0.6 and defaults["rag_top_k"] == 6
+
+    resp = await client.put(
+        "/api/settings/tuning",
+        json={
+            "rag_min_similarity": 0.45,
+            "rag_top_k": 10,
+            "reply_deadline_s": 10,
+            "triage_timeout_s": 5,
+        },
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rag_min_similarity"] == 0.45 and body["triage_timeout_s"] == 5.0
+
+    store = AppSettingsStore(session_factory, redis_client, settings)
+    assert await store.rag_top_k() == 10
+    assert await store.reply_deadline_s() == 10.0
+
+    resp = await client.put("/api/settings/tuning", json={"rag_top_k": 99}, headers=WRITE_HEADERS)
+    assert resp.status_code == 422
+
+
+async def test_sheets_settings_and_dynamic_sync(
+    client, session_factory, redis_client, settings
+) -> None:
+    """Sheets 同步后台化：凭据校验/加密存储/邮箱回显；DynamicLeadSync 未配置走 retry 语义。"""
+    import json as _json
+
+    from domain.models import AppSetting
+    from integrations.app_settings import AppSettingsStore
+    from integrations.sheets import DynamicLeadSync
+
+    await _login(client)
+    assert (await client.get("/api/settings/sheets")).json()["configured"] is False
+
+    # 未配置：测试接口 422；DynamicLeadSync 抛 RuntimeError（同步任务借此走 retry）
+    resp = await client.post("/api/settings/sheets/test", headers=WRITE_HEADERS)
+    assert resp.status_code == 422
+    store = AppSettingsStore(session_factory, redis_client, settings)
+    port = DynamicLeadSync(store)
+    try:
+        await port.upsert_lead({"lead_id": 1})
+        raise AssertionError("未配置时应抛 RuntimeError")
+    except RuntimeError as exc:
+        assert "未配置" in str(exc)
+
+    # 非法 JSON 拒绝；合法凭据保存后：configured + 邮箱回显 + 密文入库
+    resp = await client.put(
+        "/api/settings/sheets",
+        json={"service_account_json": "not-json"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 422
+    sa = {
+        "type": "service_account",
+        "client_email": "mercury@demo.iam.gserviceaccount.com",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nxx\n-----END PRIVATE KEY-----\n",
+    }
+    resp = await client.put(
+        "/api/settings/sheets",
+        json={"service_account_json": _json.dumps(sa), "spreadsheet_id": "sheet-abc-123"},
+        headers=WRITE_HEADERS,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["configured"] is True
+    assert body["service_account_email"] == "mercury@demo.iam.gserviceaccount.com"
+    assert "private_key" not in str(body)
+
+    async with session_factory() as session:
+        row = await session.get(AppSetting, "google_service_account_json")
+        assert row is not None and row.is_encrypted and "private_key" not in row.value
+
+
 async def test_provider_source_env_fallback_and_invalidate(
     session_factory, redis_client, settings
 ) -> None:

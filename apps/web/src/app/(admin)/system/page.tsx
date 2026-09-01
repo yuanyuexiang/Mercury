@@ -42,6 +42,19 @@ interface ReviveConf {
   max_attempts: number;
 }
 
+interface SheetsConf {
+  configured: boolean;
+  service_account_email: string | null;
+  spreadsheet_id: string;
+}
+
+interface TuningConf {
+  rag_min_similarity: number;
+  rag_top_k: number;
+  reply_deadline_s: number;
+  triage_timeout_s: number;
+}
+
 interface Candidate {
   chat_id: number;
   kind: string;
@@ -64,17 +77,28 @@ export default function SystemSettingsPage() {
   const [generalForm] = Form.useForm();
   const [reviveForm] = Form.useForm();
   const [savingRevive, setSavingRevive] = useState(false);
+  const [sheets, setSheets] = useState<SheetsConf | null>(null);
+  const [sheetsForm] = Form.useForm();
+  const [savingSheets, setSavingSheets] = useState(false);
+  const [testingSheets, setTestingSheets] = useState(false);
+  const [tuningForm] = Form.useForm();
+  const [savingTuning, setSavingTuning] = useState(false);
 
   const load = useCallback(async () => {
-    const [t, g, r] = await Promise.all([
+    const [t, g, r, sh, tu] = await Promise.all([
       api.get<TelegramConf>("/api/settings/telegram"),
       api.get<GeneralConf>("/api/settings/general"),
       api.get<ReviveConf>("/api/settings/revive"),
+      api.get<SheetsConf>("/api/settings/sheets"),
+      api.get<TuningConf>("/api/settings/tuning"),
     ]);
     setTg(t);
     generalForm.setFieldsValue(g);
     reviveForm.setFieldsValue(r);
-  }, [generalForm, reviveForm]);
+    setSheets(sh);
+    sheetsForm.setFieldsValue({ spreadsheet_id: sh.spreadsheet_id });
+    tuningForm.setFieldsValue(tu);
+  }, [generalForm, reviveForm, sheetsForm, tuningForm]);
 
   useEffect(() => {
     load();
@@ -165,6 +189,47 @@ export default function SystemSettingsPage() {
       message.error(e instanceof ApiError ? e.message : "保存失败");
     } finally {
       setSavingGeneral(false);
+    }
+  };
+
+  const saveSheets = async (values: { spreadsheet_id?: string; service_account_json?: string }) => {
+    setSavingSheets(true);
+    try {
+      await api.put("/api/settings/sheets", {
+        spreadsheet_id: values.spreadsheet_id,
+        service_account_json: values.service_account_json || undefined,
+      });
+      sheetsForm.setFieldsValue({ service_account_json: "" });
+      message.success("已保存——记得把表格共享给下方的 service account 邮箱");
+      await load();
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "保存失败");
+    } finally {
+      setSavingSheets(false);
+    }
+  };
+
+  const testSheets = async () => {
+    setTestingSheets(true);
+    try {
+      const r = await api.post<{ spreadsheet_title: string }>("/api/settings/sheets/test");
+      message.success(`连接正常，已就绪：《${r.spreadsheet_title}》`);
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "测试失败", 8);
+    } finally {
+      setTestingSheets(false);
+    }
+  };
+
+  const saveTuning = async (values: TuningConf) => {
+    setSavingTuning(true);
+    try {
+      await api.put("/api/settings/tuning", values);
+      message.success("已保存，下一条消息即按新参数处理");
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : "保存失败");
+    } finally {
+      setSavingTuning(false);
     }
   };
 
@@ -319,6 +384,78 @@ export default function SystemSettingsPage() {
             <InputNumber min={0} max={5} addonAfter="次" style={{ width: 110 }} />
           </Form.Item>
           <Button type="primary" htmlType="submit" loading={savingRevive}>
+            保存
+          </Button>
+        </Form>
+      </Card>
+
+      <Card title="Google Sheets 线索同步" style={{ marginTop: 16 }}>
+        {sheets?.configured ? (
+          <Alert
+            type="success"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={
+              <span>
+                已配置。请确认表格已共享给{" "}
+                <Typography.Text code copyable>
+                  {sheets.service_account_email ?? "（凭据解析失败）"}
+                </Typography.Text>{" "}
+                （编辑者权限）
+              </span>
+            }
+          />
+        ) : (
+          <Typography.Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 16 }}>
+            三步开通：① Google Cloud 控制台启用 Sheets API、创建服务账号并下载 JSON 密钥；
+            ② 新建一张空表（工作表和表头系统会自动创建）；③ 在下方粘贴 JSON 与表
+            ID，保存后把表格共享给显示出的邮箱。每条线索会自动落表，失败自动重试不丢数据。
+          </Typography.Paragraph>
+        )}
+        <Form form={sheetsForm} layout="vertical" onFinish={saveSheets} style={{ maxWidth: 560 }}>
+          <Form.Item
+            name="spreadsheet_id"
+            label="表格 ID"
+            extra="表格 URL 中 /d/ 与 /edit 之间的一长串"
+          >
+            <Input placeholder="1AbCdEf…" />
+          </Form.Item>
+          <Form.Item
+            name="service_account_json"
+            label={sheets?.configured ? "服务账号 JSON（留空保留已保存的凭据）" : "服务账号 JSON"}
+          >
+            <Input.TextArea rows={3} placeholder='粘贴整段密钥文件内容（{"type": "service_account", …}）' />
+          </Form.Item>
+          <Space>
+            <Button type="primary" htmlType="submit" loading={savingSheets}>
+              保存
+            </Button>
+            <Button loading={testingSheets} onClick={testSheets} disabled={!sheets?.configured}>
+              测试连接
+            </Button>
+          </Space>
+        </Form>
+      </Card>
+
+      <Card title="高级调优（一般无需改动）" style={{ marginTop: 16 }}>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 16 }}>
+          换 AI 服务商或 embedding 模型后才需要调整，保存即生效。经验值参考：OpenAI embedding
+          阈值 0.60；Qwen3-Embedding 阈值 0.45、检索条数 10；DeepSeek 意图识别 5 秒。
+        </Typography.Paragraph>
+        <Form form={tuningForm} layout="inline" onFinish={saveTuning} style={{ rowGap: 12 }}>
+          <Form.Item name="rag_min_similarity" label="检索相似度阈值">
+            <InputNumber min={0.05} max={0.95} step={0.05} style={{ width: 90 }} />
+          </Form.Item>
+          <Form.Item name="rag_top_k" label="检索条数">
+            <InputNumber min={1} max={20} style={{ width: 80 }} />
+          </Form.Item>
+          <Form.Item name="reply_deadline_s" label="回复总预算">
+            <InputNumber min={3} max={60} addonAfter="秒" style={{ width: 110 }} />
+          </Form.Item>
+          <Form.Item name="triage_timeout_s" label="意图识别上限">
+            <InputNumber min={0.5} max={20} step={0.5} addonAfter="秒" style={{ width: 110 }} />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={savingTuning}>
             保存
           </Button>
         </Form>
