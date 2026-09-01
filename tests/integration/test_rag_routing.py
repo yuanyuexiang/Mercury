@@ -21,7 +21,7 @@ async def test_refusal_path(session_factory, locker, sender, brain) -> None:
     brain.refuse = True
     uid = await _seed(session_factory, tg_update(301, "你们支持量子计算吗"))
     assert await run_process_update(session_factory, locker, sender, brain, uid) == "done"
-    assert len(sender.sent) == 1 and "无法" in sender.sent[0][1]
+    assert len(sender.sent) == 1 and "同事来确认" in sender.sent[0][1]
     assert any("知识库无法回答" in n for n in sender.notices)
     async with session_factory() as session:
         outbound = (
@@ -63,12 +63,25 @@ async def test_triage_failure_defaults_to_rag(session_factory, locker, sender, b
     assert sender.sent == [(1000, "回答：价格多少")]
 
 
+async def test_english_user_gets_english_refusal(session_factory, locker, sender, brain) -> None:
+    """客户可见文案按语言输出（2026-09-01 文案修订）：英文档案用户收到英文拒答，不再中英堆叠。"""
+    brain.refuse = True
+    async with session_factory() as session:
+        await repositories.insert_update(
+            session, 219, tg_update(219, "What is your SLA?", language_code="en")
+        )
+        await session.commit()
+    assert await run_process_update(session_factory, locker, sender, brain, 219) == "done"
+    reply = sender.sent[0][1]
+    assert "teammate" in reply and "同事" not in reply
+
+
 async def test_answer_failure_refuses_safely(session_factory, locker, sender, brain) -> None:
     """RAG 生成异常 → 拒答路径，不让用户无响应（§6 第 3d 步）。"""
     brain.raise_on_answer = True
     uid = await _seed(session_factory, tg_update(305, "支持私有化吗"))
     assert await run_process_update(session_factory, locker, sender, brain, uid) == "done"
-    assert len(sender.sent) == 1 and "无法" in sender.sent[0][1]
+    assert len(sender.sent) == 1 and "同事来确认" in sender.sent[0][1]
 
 
 async def test_no_brain_degrades_safely(session_factory, locker, sender) -> None:

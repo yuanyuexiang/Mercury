@@ -32,6 +32,8 @@ M5 说明：管线出现购买意图（或已有 lead）→ update 标 `replied`
 
 M4 说明：LLM 依赖经 `Brain` 协议注入编排层（实现在 `llm/brain.py`，测试用 conftest 的 FakeBrain）；提示词全部在 `llm/prompts.py`（拒答用 NO_ANSWER_MARKER 哨兵）；端到端预算 `Deadline` 在 `domain/schemas.py`（triage 上限 2s 计入总预算，RAG 拿剩余）；chat 客户端双档策略——用户路径不重试不切 fallback，非用户路径重试1次+fallback。**真实模型验收**：配好 `.env`（LLM_API_KEY/LLM_CHAT_MODEL）后跑 `uv run python scripts/eval_rag.py --with-answers`，看"生成级报告"两个指标。
 
+文案本地化（2026-09-01）：`domain/texts.py` 全部客户可见固定文案改为按客户语言输出函数（`refused_no_answer(lang)` 等；lang = triage 识别优先、Telegram `language_code` 兜底，"auto"/空默认中文），不再中英堆叠；文案纪律：不暴露内部概念（知识库/资料）、拒答语气"接住"不"推开"；`revive_follow_up` 刻意保持双语（沉睡客户语言不确定）。
+
 M2 说明：业务管线在 `domain/orchestrator.py`（MessageSender/ConversationLocker 协议注入，arq 任务只是薄包装）；echo 回复是 M4 RAG 的占位；/human 仅通知（状态机在 M6）；无 `TELEGRAM_BOT_TOKEN` 时自动用 LoggingSender 替身，本地无需真实 bot 即可全链路测试。
 
 M3 说明：索引流程在 `llm/indexing.py`（版本化原子切换，无知识真空期）；检索在 `llm/rag.py`；无 `LLM_API_KEY` 时 embedder 为 None、索引任务明确失败（绝不用假向量污染知识库）；`DeterministicFakeEmbedder` 仅用于测试与 `--fake` 冒烟。评测：`uv run python scripts/eval_rag.py`（真实 key）或 `--fake`（离线管线冒烟）；评测集在 `scripts/eval/evalset.json`（当前 14 题，待扩到 30–50）。SQLAlchemy 坑：chunks 的 metadata 列映射属性名是 `meta`，insert values 必须用 `meta` 做键。

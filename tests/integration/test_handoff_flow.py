@@ -102,7 +102,7 @@ async def test_human_command_idempotent(session_factory, locker, sender, brain) 
     """重复 /human：只回确认文案，不产生第二条未解决 handoff（第二轮评审修复项）。"""
     await _send(session_factory, locker, sender, brain, 531, "/human")
     await _send(session_factory, locker, sender, brain, 532, "/human")
-    assert any("已收到通知" in text for _, text in sender.sent)
+    assert any("在赶来的路上" in text for _, text in sender.sent)
     assert (await _get_conv(session_factory)).status == "handoff_pending"
     async with session_factory() as session:
         handoffs = (await session.execute(select(Handoff))).scalars().all()

@@ -121,7 +121,11 @@ async def _capture_start_channel(
 
 
 def _route_command(
-    command: str, update_id: int, conversation: Conversation, brand_name: str = ""
+    command: str,
+    update_id: int,
+    conversation: Conversation,
+    brand_name: str = "",
+    lang: str = "",
 ) -> ReplyPlan | None:
     """命令分支（不经 LLM，§6 第 3a 步）。返回 None 表示不是已知命令。"""
     if command == "/start":
@@ -129,7 +133,7 @@ def _route_command(
             messages=[
                 PlannedMessage(
                     delivery_key=f"reply:{update_id}",
-                    text=texts.welcome(brand_name),
+                    text=texts.welcome(brand_name, lang),
                     sender_type="system",
                 )
             ]
@@ -138,7 +142,9 @@ def _route_command(
         return ReplyPlan(
             messages=[
                 PlannedMessage(
-                    delivery_key=f"reply:{update_id}", text=texts.RESET_DONE, sender_type="system"
+                    delivery_key=f"reply:{update_id}",
+                    text=texts.reset_done(lang),
+                    sender_type="system",
                 )
             ]
         )
@@ -146,7 +152,7 @@ def _route_command(
 
 
 async def _handle_human_command(
-    session: AsyncSession, conversation: Conversation, update_id: int
+    session: AsyncSession, conversation: Conversation, update_id: int, lang: str = ""
 ) -> ReplyPlan:
     """/human 幂等接管（§9）：已在 pending/active 只回确认，不重复 transition、不新建记录。"""
     if conversation.status in handoff.SILENT_STATUSES:
@@ -154,7 +160,7 @@ async def _handle_human_command(
             messages=[
                 PlannedMessage(
                     delivery_key=f"reply:{update_id}",
-                    text=texts.HUMAN_ALREADY,
+                    text=texts.human_already(lang),
                     sender_type="system",
                 )
             ]
@@ -164,19 +170,19 @@ async def _handle_human_command(
     return ReplyPlan(
         messages=[
             PlannedMessage(
-                delivery_key=f"reply:{update_id}", text=texts.HUMAN_ACK, sender_type="system"
+                delivery_key=f"reply:{update_id}", text=texts.human_ack(lang), sender_type="system"
             )
         ],
         notify_operator=f"用户请求人工（会话 {conversation.id}）",
     )
 
 
-def _not_configured_plan(conversation: Conversation, update_id: int) -> ReplyPlan:
+def _not_configured_plan(conversation: Conversation, update_id: int, lang: str = "") -> ReplyPlan:
     return ReplyPlan(
         messages=[
             PlannedMessage(
                 delivery_key=f"reply:{update_id}",
-                text=texts.LLM_NOT_CONFIGURED,
+                text=texts.llm_not_configured(lang),
                 sender_type="system",
                 answer_status="refused",
             )
@@ -192,10 +198,11 @@ async def _decide(
     update_id: int,
     text_content: str,
     reply_deadline_s: float,
+    user_lang: str = "",
 ) -> ReplyPlan:
     """非命令文本的路由（§6 第 3c–3e 步）：triage → RAG/闲聊，全程共享端到端 deadline。"""
     if brain is None:
-        return _not_configured_plan(conversation, update_id)
+        return _not_configured_plan(conversation, update_id, user_lang)
 
     deadline = Deadline(reply_deadline_s)
     recent = await repositories.get_recent_messages(session, conversation.id)
@@ -204,12 +211,15 @@ async def _decide(
     try:
         tri = await brain.triage(history, deadline)
     except LlmNotConfiguredError:
-        return _not_configured_plan(conversation, update_id)
+        return _not_configured_plan(conversation, update_id, user_lang)
     except Exception:
         logger.warning("triage_failed_using_defaults", update_id=update_id)
         tri = TriageResult()  # risk=none, needs_rag=True：宁可多检索，不可漏风险以外的回答
 
     # §6 第 5 步：购买意图或已有 lead → 回复后由 extract_lead 任务提取（敏感分支除外）
+    # 客户语言：triage 识别优先（跟随消息语言），未识别时用 Telegram 档案语言
+    lang = tri.language if tri.language not in ("", "auto") else user_lang
+
     existing_lead = await repositories.get_lead_by_conversation(session, conversation.id)
     needs_extraction = tri.purchase_intent or existing_lead is not None
 
@@ -221,7 +231,7 @@ async def _decide(
             messages=[
                 PlannedMessage(
                     delivery_key=f"reply:{update_id}",
-                    text=texts.SENSITIVE_TO_HUMAN,
+                    text=texts.sensitive_to_human(lang),
                     sender_type="system",
                     answer_status="handoff",
                 )
@@ -233,7 +243,9 @@ async def _decide(
         return ReplyPlan(
             messages=[
                 PlannedMessage(
-                    delivery_key=f"reply:{update_id}", text=texts.SMALLTALK, sender_type="system"
+                    delivery_key=f"reply:{update_id}",
+                    text=texts.smalltalk(lang),
+                    sender_type="system",
                 )
             ],
             needs_lead_extraction=needs_extraction,
@@ -242,7 +254,7 @@ async def _decide(
     try:
         ans = await brain.answer(session, text_content, history, tri.language, deadline)
     except LlmNotConfiguredError:
-        return _not_configured_plan(conversation, update_id)
+        return _not_configured_plan(conversation, update_id, user_lang)
     except Exception:
         logger.warning("rag_answer_failed_refusing", update_id=update_id)
         ans = RagAnswer(refused=True)
@@ -254,7 +266,7 @@ async def _decide(
             messages=[
                 PlannedMessage(
                     delivery_key=f"reply:{update_id}",
-                    text=texts.REFUSED_NO_ANSWER,
+                    text=texts.refused_no_answer(lang),
                     answer_status="refused",
                     model_name=ans.model_name,
                     prompt_tokens=ans.prompt_tokens,
@@ -351,6 +363,7 @@ async def run_process_update(
     message = payload.get("message") or {}
     chat = message.get("chat") or {}
     tg_user = message.get("from")
+    user_lang = (tg_user or {}).get("language_code") or ""
     chat_id = chat.get("id")
     if chat_id is None or tg_user is None:
         # 非消息类 update（edited_message/callback 等）：MVP 直接跳过
@@ -406,7 +419,7 @@ async def run_process_update(
                             messages=[
                                 PlannedMessage(
                                     delivery_key=f"reply:{update_id}",
-                                    text=texts.NON_TEXT_UNSUPPORTED,
+                                    text=texts.non_text_unsupported(user_lang),
                                     sender_type="system",
                                 )
                             ],
@@ -418,10 +431,12 @@ async def run_process_update(
                     if command == "/start":
                         await _capture_start_channel(session, conversation, stripped)
                     if command == "/human":
-                        plan = await _handle_human_command(session, conversation, update_id)
+                        plan = await _handle_human_command(
+                            session, conversation, update_id, user_lang
+                        )
                     else:
                         routed = (
-                            _route_command(command, update_id, conversation, brand_name)
+                            _route_command(command, update_id, conversation, brand_name, user_lang)
                             if command
                             else None
                         )
@@ -444,6 +459,7 @@ async def run_process_update(
                                 update_id,
                                 text_content,
                                 reply_deadline_s,
+                                user_lang,
                             )
 
                 if command == "/reset":
@@ -488,7 +504,7 @@ async def run_process_update(
                                 messages=[
                                     PlannedMessage(
                                         delivery_key=f"fallback:{update_id}",
-                                        text=texts.FALLBACK_ERROR,
+                                        text=texts.fallback_error(user_lang),
                                         sender_type="system",
                                     )
                                 ]

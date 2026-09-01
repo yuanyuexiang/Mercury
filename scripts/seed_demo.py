@@ -35,10 +35,10 @@ from domain.models import (
 )
 from domain.scoring import score_lead
 from domain.texts import (
-    HUMAN_ACK,
-    REFUSED_NO_ANSWER,
-    SENSITIVE_TO_HUMAN,
+    human_ack,
+    refused_no_answer,
     revive_follow_up,
+    sensitive_to_human,
     welcome,
 )
 from sqlalchemy import text as sql_text
@@ -273,7 +273,7 @@ def _scenarios() -> list[dict[str, Any]]:
                     "u",
                     "I want to discuss partner pricing for 10+ clients. Can I talk to a person?",
                 ),
-                ("h", HUMAN_ACK),
+                ("h", human_ack("en")),
                 (
                     "op",
                     "Hi Deniz, this is Tom from the Mercury team — great to meet you. "
@@ -321,7 +321,7 @@ def _scenarios() -> list[dict[str, Any]]:
             "status": "ai_active",
             "turns": [
                 ("u", "如果上线后效果不好，能退款吗？"),
-                ("h", SENSITIVE_TO_HUMAN),
+                ("h", sensitive_to_human("zh")),
                 (
                     "op",
                     "你好，我是 Mercury 团队的 Tom。退款条款我们在报价单里书面约定："
@@ -549,7 +549,7 @@ def _scenarios() -> list[dict[str, Any]]:
                     "don't go cold. High-intent users get routed straight to you.",
                 ),
                 ("u", "/human I'd rather just talk to a person about setup"),
-                ("h", HUMAN_ACK),
+                ("h", human_ack("en")),
             ],
             "lead": {
                 "name": "Mark",
@@ -584,7 +584,7 @@ def _scenarios() -> list[dict[str, Any]]:
                     "support well. I've noted your contact; our team can walk you through it.",
                 ),
                 ("u", "Before we share anything: can you sign an NDA and a DPA?"),
-                ("h", SENSITIVE_TO_HUMAN),
+                ("h", sensitive_to_human("en")),
             ],
             "lead": {
                 "name": "Julia Moreau",
@@ -750,7 +750,7 @@ async def seed(session: AsyncSession) -> dict[str, int]:
                         delivery_key=f"ack:{last_update_id}",
                         direction="outbound",
                         sender_type="ai",
-                        content=welcome(BRAND),
+                        content=welcome(BRAND, lang or ""),
                         delivery_status="sent",
                         created_at=t,
                     )
@@ -778,7 +778,7 @@ async def seed(session: AsyncSession) -> dict[str, int]:
                         delivery_key=f"reply:{last_update_id}",
                         direction="outbound",
                         sender_type="ai",
-                        content=REFUSED_NO_ANSWER,
+                        content=refused_no_answer(lang or ""),
                         delivery_status="sent",
                         answer_status="refused",
                         confidence=round(_rng.uniform(0.18, 0.42), 2),

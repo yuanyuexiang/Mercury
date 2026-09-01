@@ -219,12 +219,16 @@ def tg_update(
     chat_id: int = 1000,
     user_id: int = 500,
     message_id: int | None = None,
+    language_code: str | None = None,
 ) -> dict[str, Any]:
     """构造 Telegram update payload；text_content=None 模拟非文本消息（如图片）。"""
+    sender: dict[str, Any] = {"id": user_id, "first_name": "Test", "username": "tester"}
+    if language_code is not None:
+        sender["language_code"] = language_code
     message: dict[str, Any] = {
         "message_id": message_id if message_id is not None else update_id,
         "chat": {"id": chat_id, "type": "private"},
-        "from": {"id": user_id, "first_name": "Test", "username": "tester"},
+        "from": sender,
     }
     if text_content is not None:
         message["text"] = text_content
