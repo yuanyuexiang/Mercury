@@ -16,6 +16,7 @@ import {
   Empty,
   Input,
   Popconfirm,
+  Segmented,
   Progress,
   Spin,
   Tag,
@@ -100,7 +101,7 @@ const LEAD_FIELDS: Array<[string, string]> = [
 const STATUS_CHIPS: Array<[string | undefined, string]> = [
   [undefined, "全部"],
   ["handoff_pending", "待接管"],
-  ["ai_active", "AI 接待"],
+  ["ai_active", "AI接待"],
   ["human_active", "人工"],
   ["closed", "已关闭"],
 ];
@@ -351,7 +352,7 @@ export default function ConversationsWorkbench() {
     <div
       style={{
         display: "flex",
-        height: "calc(100vh - 90px)",
+        height: "calc(100vh - 40px)",
         background: "#fff",
         border: panelBorder,
         borderRadius: 12,
@@ -380,18 +381,14 @@ export default function ConversationsWorkbench() {
               setPagesLoaded(1);
             }}
           />
-          <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 4 }}>
-            {STATUS_CHIPS.map(([value, label]) => (
-              <Tag.CheckableTag
-                key={label}
-                checked={status === value}
-                onChange={() => changeStatus(value)}
-                style={{ fontSize: 12, userSelect: "none" }}
-              >
-                {label}
-              </Tag.CheckableTag>
-            ))}
-          </div>
+          <Segmented
+            block
+            size="small"
+            style={{ marginTop: 8, fontSize: 12 }}
+            value={status ?? ""}
+            onChange={(v) => changeStatus((v as string) || undefined)}
+            options={STATUS_CHIPS.map(([value, label]) => ({ label, value: value ?? "" }))}
+          />
         </div>
         <div style={{ flex: 1, overflowY: "auto" }}>
           {listLoading && rows.length === 0 ? (

@@ -14,6 +14,7 @@ import {
   Form,
   Input,
   Progress,
+  Segmented,
   Select,
   Spin,
   Tag,
@@ -208,7 +209,7 @@ export default function LeadsWorkbench() {
     <div
       style={{
         display: "flex",
-        height: "calc(100vh - 90px)",
+        height: "calc(100vh - 40px)",
         background: "#fff",
         border: panelBorder,
         borderRadius: 12,
@@ -228,18 +229,14 @@ export default function LeadsWorkbench() {
         }}
       >
         <div style={{ padding: "10px 12px 8px", borderBottom: panelBorder }}>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-            {GRADE_CHIPS.map(([value, label]) => (
-              <Tag.CheckableTag
-                key={label}
-                checked={grade === value}
-                onChange={() => changeGrade(value)}
-                style={{ fontSize: 12, userSelect: "none" }}
-              >
-                {label}
-              </Tag.CheckableTag>
-            ))}
-          </div>
+          <Segmented
+            block
+            size="small"
+            style={{ fontSize: 12 }}
+            value={grade ?? ""}
+            onChange={(v) => changeGrade((v as string) || undefined)}
+            options={GRADE_CHIPS.map(([value, label]) => ({ label, value: value ?? "" }))}
+          />
           <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
             <Select
               allowClear

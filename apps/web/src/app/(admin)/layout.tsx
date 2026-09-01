@@ -172,7 +172,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       </aside>
 
       <main style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ padding: "20px 24px 36px", maxWidth: 1480, margin: "0 auto" }}>
+        {/* 上下对称 20px：工作台页（会话/线索/模型配置）按 calc(100vh - 40px) 撑满，四周留匀边 */}
+        <div style={{ padding: "20px 24px", maxWidth: 1480, margin: "0 auto" }}>
           {children}
         </div>
       </main>

@@ -542,7 +542,7 @@ export default function SettingsPage() {
     <div
       style={{
         display: "flex",
-        height: "calc(100vh - 90px)",
+        height: "calc(100vh - 40px)",
         background: "#fff",
         border: panelBorder,
         borderRadius: 12,
