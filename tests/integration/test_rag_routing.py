@@ -63,6 +63,23 @@ async def test_triage_failure_defaults_to_rag(session_factory, locker, sender, b
     assert sender.sent == [(1000, "回答：价格多少")]
 
 
+async def test_purchase_intent_refusal_becomes_ack(session_factory, locker, sender, brain) -> None:
+    """购买意向表态（"我想要 X"）遇 RAG 拒答走推进话术（2026-09-01）：
+    不给客户"答不上来"观感、不记知识缺口、通知运营是购买意向而非无法回答。"""
+    from domain.schemas import TriageResult
+
+    brain.refuse = True
+    brain.triage_result = TriageResult(purchase_intent=True, language="zh")
+    async with session_factory() as session:
+        await repositories.insert_update(session, 221, tg_update(221, "好的，我想一套托管服务"))
+        await session.commit()
+    outcome = await run_process_update(session_factory, locker, sender, brain, 221)
+    assert outcome == "replied"  # 进入 extract_lead 提取路径
+    assert "转给同事" in sender.sent[0][1]
+    assert any("购买意向" in n for n in sender.notices)
+    assert not any("无法回答" in n for n in sender.notices)
+
+
 async def test_english_user_gets_english_refusal(session_factory, locker, sender, brain) -> None:
     """客户可见文案按语言输出（2026-09-01 文案修订）：英文档案用户收到英文拒答，不再中英堆叠。"""
     brain.refuse = True

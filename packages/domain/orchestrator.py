@@ -260,6 +260,23 @@ async def _decide(
         ans = RagAnswer(refused=True)
 
     if ans.refused or not ans.text:
+        if tri.purchase_intent:
+            # 购买意向的表态（"我想要 X"）不是知识问答：RAG 没东西可"回答"很正常，
+            # 但绝不能给客户"答不上来"的观感——确认 + 引导补充信息，
+            # 后续由 extract_lead 完成追问/评分/高意向通知（§6 第 5 步）
+            return ReplyPlan(
+                messages=[
+                    PlannedMessage(
+                        delivery_key=f"reply:{update_id}",
+                        text=texts.purchase_ack(lang),
+                        sender_type="system",
+                    )
+                ],
+                notify_operator=(
+                    f"客户表达购买意向（会话 {conversation.id}）：{text_content[:80]}"
+                ),
+                needs_lead_extraction=True,
+            )
         # 通知型触发（§9）：写记录 + 提醒，会话保持 ai_active
         await handoff.notify_only(session, conversation.id, "low_confidence")
         return ReplyPlan(

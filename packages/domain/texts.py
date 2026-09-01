@@ -78,6 +78,19 @@ def refused_no_answer(lang: str = "") -> str:
     )
 
 
+def purchase_ack(lang: str = "") -> str:
+    """购买意向表态（非提问）无法走 RAG 回答时的推进话术：确认 + 引导补充信息。"""
+    if _is_zh(lang):
+        return (
+            "收到！我已经把您的需求转给同事，会尽快联系您对接。"
+            "也欢迎先告诉我您的使用场景和大概的时间安排，帮您加快推进。"
+        )
+    return (
+        "Great — I've passed your request to our team and they'll reach out shortly. "
+        "Feel free to share a bit about your use case and timeline to speed things up."
+    )
+
+
 def smalltalk(lang: str = "") -> str:
     if _is_zh(lang):
         return "您好！我是产品客服助手，产品功能、价格、部署方式都可以问我。"
