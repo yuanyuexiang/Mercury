@@ -240,6 +240,22 @@ async def _decide(
         )
 
     if not tri.needs_rag:
+        if tri.purchase_intent:
+            # 纯购买表态（triage 认为无需检索）：绝不能回问候语——
+            # 确认接单，信息收集交给 extract_lead 的追问（§6 第 5 步）
+            return ReplyPlan(
+                messages=[
+                    PlannedMessage(
+                        delivery_key=f"reply:{update_id}",
+                        text=texts.purchase_ack(lang),
+                        sender_type="system",
+                    )
+                ],
+                notify_operator=(
+                    f"客户表达购买意向（会话 {conversation.id}）：{text_content[:80]}"
+                ),
+                needs_lead_extraction=True,
+            )
         return ReplyPlan(
             messages=[
                 PlannedMessage(

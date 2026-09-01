@@ -32,7 +32,7 @@ M5 说明：管线出现购买意图（或已有 lead）→ update 标 `replied`
 
 M4 说明：LLM 依赖经 `Brain` 协议注入编排层（实现在 `llm/brain.py`，测试用 conftest 的 FakeBrain）；提示词全部在 `llm/prompts.py`（拒答用 NO_ANSWER_MARKER 哨兵）；端到端预算 `Deadline` 在 `domain/schemas.py`（triage 上限 2s 计入总预算，RAG 拿剩余）；chat 客户端双档策略——用户路径不重试不切 fallback，非用户路径重试1次+fallback。**真实模型验收**：配好 `.env`（LLM_API_KEY/LLM_CHAT_MODEL）后跑 `uv run python scripts/eval_rag.py --with-answers`，看"生成级报告"两个指标。
 
-文案本地化（2026-09-01）：`domain/texts.py` 全部客户可见固定文案改为按客户语言输出函数（`refused_no_answer(lang)` 等；lang = triage 识别优先、Telegram `language_code` 兜底，"auto"/空默认中文），不再中英堆叠；文案纪律：不暴露内部概念（知识库/资料）、拒答语气"接住"不"推开"；`revive_follow_up` 刻意保持双语（沉睡客户语言不确定）。购买意向拒答改道（同日）：triage `purchase_intent=True` 且 RAG 拒答时走 `texts.purchase_ack`（确认+引导补充信息）而非拒答文案，不记 low_confidence、通知文案为"客户表达购买意向"，仍入 extract_lead；RAG 提示词补充规则——意向表态且材料覆盖时热情推进而非输出哨兵。
+文案本地化（2026-09-01）：`domain/texts.py` 全部客户可见固定文案改为按客户语言输出函数（`refused_no_answer(lang)` 等；lang = triage 识别优先、Telegram `language_code` 兜底，"auto"/空默认中文），不再中英堆叠；文案纪律：不暴露内部概念（知识库/资料）、拒答语气"接住"不"推开"；`revive_follow_up` 刻意保持双语（沉睡客户语言不确定）。购买意向改道（同日）：triage `purchase_intent=True` 时，RAG 拒答分支**和 needs_rag=False 闲聊分支**都走 `texts.purchase_ack`（纯接单确认，不追问——信息收集让给 extract_lead 追问免抢话）而非拒答/问候文案，不记 low_confidence、通知文案为"客户表达购买意向"，仍入 extract_lead；RAG 提示词补充规则——意向表态且材料覆盖时热情推进而非输出哨兵；提取提示词强约束 follow_up_question 必须用客户消息的语言（DeepSeek 曾对中文客户飙英文追问）。
 
 M2 说明：业务管线在 `domain/orchestrator.py`（MessageSender/ConversationLocker 协议注入，arq 任务只是薄包装）；echo 回复是 M4 RAG 的占位；/human 仅通知（状态机在 M6）；无 `TELEGRAM_BOT_TOKEN` 时自动用 LoggingSender 替身，本地无需真实 bot 即可全链路测试。
 

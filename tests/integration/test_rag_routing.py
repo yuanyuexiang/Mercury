@@ -80,6 +80,24 @@ async def test_purchase_intent_refusal_becomes_ack(session_factory, locker, send
     assert not any("无法回答" in n for n in sender.notices)
 
 
+async def test_purchase_statement_without_rag_gets_ack_not_smalltalk(
+    session_factory, locker, sender, brain
+) -> None:
+    """纯购买表态被 triage 判为无需检索时（2026-09-01 生产实测）：
+    必须回接单确认而不是问候语——"我要买"换来"您好我是客服助手"是销售事故。"""
+    from domain.schemas import TriageResult
+
+    brain.triage_result = TriageResult(purchase_intent=True, needs_rag=False, language="zh")
+    async with session_factory() as session:
+        await repositories.insert_update(session, 222, tg_update(222, "我想买，给我报个价"))
+        await session.commit()
+    outcome = await run_process_update(session_factory, locker, sender, brain, 222)
+    assert outcome == "replied"
+    assert "转给同事" in sender.sent[0][1]
+    assert "客服助手" not in sender.sent[0][1]
+    assert any("购买意向" in n for n in sender.notices)
+
+
 async def test_english_user_gets_english_refusal(session_factory, locker, sender, brain) -> None:
     """客户可见文案按语言输出（2026-09-01 文案修订）：英文档案用户收到英文拒答，不再中英堆叠。"""
     brain.refuse = True
