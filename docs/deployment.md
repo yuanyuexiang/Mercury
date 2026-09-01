@@ -135,6 +135,11 @@ curl -s "https://api.telegram.org/bot<TOKEN>/getWebhookInfo" | python3 -m json.t
 
 **模型选型铁律（2026-09 实测）**：对话槽只能用**非思考型快速模型**——智谱 4.7/5.x 全系（含 flash 后缀）默认深度思考，出话 10 秒+，必超时；可用：glm-4-flash（免费、偏弱）、SiliconFlow 的 deepseek-ai/DeepSeek-V3（推荐）。换 embedding 模型后要连着验证：阈值（诊断脚本看 top 分数）+ top_k（确认关键块入围）。
 
+**手动改 .env 后的安全重启**：deploy.sh 会把当前版本写进 `.env` 的 `IMAGE_TAG`，因此改配置后直接
+`docker compose --env-file .env -f compose.prod.yaml up -d --force-recreate api worker` 即可。
+⚠ 若 `.env` 里没有 `IMAGE_TAG`（旧版 deploy.sh 部署的），先补 `IMAGE_TAG=$(cat .current_tag)`，
+否则 compose 会回退到本地陈旧的 `:latest` 镜像——症状是重启后"修过的 bug 又回来了"。
+
 **容器内检索诊断**（打印 top-6 相似度与生成结果，定位拒答原因）：
 ```bash
 docker compose -f compose.prod.yaml exec -T api python - <<'PYEOF'

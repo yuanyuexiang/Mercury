@@ -118,6 +118,13 @@ if [ "$READY" != "1" ]; then
   exit 1
 fi
 echo "$TAG" > "$PREV_FILE"  # 应用本体健康即记录：.current_tag = 最后一个可用版本
+# IMAGE_TAG 落盘进 .env：此后任何手动 `docker compose --env-file .env ... up -d`
+# 都用当前版本，而不是回退到本地陈旧的 :latest（2026-09-01 生产实测踩坑）
+if grep -q '^IMAGE_TAG=' .env; then
+  sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=$TAG|" .env
+else
+  printf '\nIMAGE_TAG=%s\n' "$TAG" >> .env
+fi
 echo "==> 应用就绪：$TAG"
 
 echo "==> 健康检查②：公网入口 ${PUBLIC_BASE_URL}/health/ready"
