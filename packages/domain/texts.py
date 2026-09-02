@@ -86,6 +86,13 @@ def purchase_ack(lang: str = "") -> str:
     return "Great — I've passed your request to our team and they'll reach out shortly."
 
 
+def purchase_reassure(lang: str = "") -> str:
+    """已有线索的客户再次催促购买：安抚推进，与首次接单确认措辞区分开。"""
+    if _is_zh(lang):
+        return "收到，同事正在安排对接，会尽快联系您！"
+    return "On it — our team is arranging the follow-up and will contact you very soon."
+
+
 def casual_ack(lang: str = "") -> str:
     """已有线索会话里的短消息（"好的/不需要/谢谢"）：轻确认，不自我介绍、不打扰运营。"""
     if _is_zh(lang):

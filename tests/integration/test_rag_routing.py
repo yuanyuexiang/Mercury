@@ -125,6 +125,32 @@ async def test_existing_lead_short_reply_gets_casual_ack(
     assert len(sender.notices) == notices_before  # 不再重复"购买意向"通知
 
 
+async def test_repeat_purchase_push_with_lead_is_not_knowledge_gap(
+    session_factory, locker, sender, brain
+) -> None:
+    """已有线索 + 再次催单 + RAG 拒答：安抚推进 + "催促"通知，绝不发"知识库无法回答"。"""
+    from domain.schemas import TriageResult
+
+    brain.refuse = True
+    brain.triage_result = TriageResult(purchase_intent=True, language="zh")
+    async with session_factory() as session:
+        await repositories.insert_update(session, 225, tg_update(225, "我想买，报个价"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 225)  # 首个信号：接单确认
+
+    async with session_factory() as session:
+        conv = (await session.execute(select(Conversation))).scalar_one()
+        await repositories.get_or_create_lead(session, conv.user_id, conv.id, None)
+        await session.commit()
+    async with session_factory() as session:
+        await repositories.insert_update(session, 226, tg_update(226, "我想买，快点报价"))
+        await session.commit()
+    await run_process_update(session_factory, locker, sender, brain, 226)
+    assert "正在安排对接" in sender.sent[-1][1]
+    assert any("催促" in n for n in sender.notices)
+    assert not any("无法回答" in n for n in sender.notices)
+
+
 async def test_english_user_gets_english_refusal(session_factory, locker, sender, brain) -> None:
     """客户可见文案按语言输出（2026-09-01 文案修订）：英文档案用户收到英文拒答，不再中英堆叠。"""
     brain.refuse = True

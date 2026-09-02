@@ -309,6 +309,20 @@ async def _decide(
                 ),
                 needs_lead_extraction=True,
             )
+        if tri.purchase_intent and existing_lead is not None:
+            # 已有线索的客户再次催促购买而 RAG 无可答：这是催促信号不是知识缺口——
+            # 安抚推进 + 正确标签的通知，绝不发"知识库无法回答"（生产实测）
+            return ReplyPlan(
+                messages=[
+                    PlannedMessage(
+                        delivery_key=f"reply:{update_id}",
+                        text=texts.purchase_reassure(lang),
+                        sender_type="system",
+                    )
+                ],
+                notify_operator=(f"客户催促跟进（会话 {conversation.id}）：{text_content[:80]}"),
+                needs_lead_extraction=True,
+            )
         # 通知型触发（§9）：写记录 + 提醒，会话保持 ai_active
         await handoff.notify_only(session, conversation.id, "low_confidence")
         return ReplyPlan(
