@@ -61,6 +61,7 @@ interface Candidate {
   name: string;
   last_text: string;
   received_at: string;
+  is_customer?: boolean;
 }
 
 export default function SystemSettingsPage() {
@@ -506,6 +507,11 @@ export default function SystemSettingsPage() {
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontWeight: 570, fontSize: 13.5 }}>
                   {c.name} <Tag style={{ fontSize: 11 }}>{c.kind}</Tag>
+                  {c.is_customer && (
+                    <Tag color="warning" style={{ fontSize: 11 }}>
+                      ⚠ 客户会话——选它会把内部通知发给这个客户
+                    </Tag>
+                  )}
                 </div>
                 <div
                   style={{

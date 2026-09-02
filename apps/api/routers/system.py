@@ -8,7 +8,7 @@ from typing import Any
 
 import structlog
 from domain import repositories
-from domain.models import KnowledgeDocument, LlmProvider, TelegramUpdate
+from domain.models import Conversation, KnowledgeDocument, LlmProvider, TelegramUpdate
 from fastapi import APIRouter, HTTPException, Request
 from integrations.app_settings import (
     KEY_BOT_TONE_HINT,
@@ -223,6 +223,20 @@ async def telegram_candidates(request: Request) -> dict[str, Any]:
         )
         if len(items) >= 5:
             break
+    # 防呆（2026-09-02）：候选大多来自客户流量——标记"已是客户会话"的 chat，
+    # 前端警示，避免管理员误把内部通知配到某个客户的私聊里
+    if items:
+        async with request.app.state.session_factory() as session:
+            rows2 = (
+                await session.execute(
+                    select(Conversation.telegram_chat_id).where(
+                        Conversation.telegram_chat_id.in_([c["chat_id"] for c in items])
+                    )
+                )
+            ).all()
+        customer_ids = {r[0] for r in rows2}
+        for c in items:
+            c["is_customer"] = c["chat_id"] in customer_ids
     return {"items": items}
 
 
