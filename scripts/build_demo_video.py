@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "demo-video" / "build"
 OUTPUT = ROOT / "demo-video" / "mercury-demo-live-16x9.mp4"
 SRT = ROOT / "demo-video" / "mercury-demo-live-en.srt"
+VOICEOVER = ROOT / "demo-video" / "mercury-demo-live-voiceover.mp3"
 FONT = "/System/Library/Fonts/Supplemental/Arial.ttf"
 
 
@@ -277,7 +278,17 @@ def main() -> None:
 
     concat = BUILD / "concat.txt"
     concat.write_text("".join(f"file '{clip.name}'\n" for clip in clips), encoding="utf-8")
-    run("ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(OUTPUT))
+    draft = BUILD / "draft.mp4"
+    run("ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(draft))
+    run(
+        "ffmpeg", "-loglevel", "error", "-y", "-i", str(draft), "-map", "0:v:0", "-map", "0:a:0",
+        "-c:v", "copy", "-af", "loudnorm=I=-14:LRA=7:TP=-1.0", "-c:a", "aac", "-b:a", "192k",
+        "-disposition:a:0", "default", "-movflags", "+faststart", str(OUTPUT),
+    )
+    run(
+        "ffmpeg", "-loglevel", "error", "-y", "-i", str(OUTPUT), "-vn", "-map", "0:a:0",
+        "-c:a", "libmp3lame", "-b:a", "192k", str(VOICEOVER),
+    )
     SRT.write_text("\n".join(subtitles), encoding="utf-8")
     print(f"Built {OUTPUT} ({elapsed:.1f}s)")
 
